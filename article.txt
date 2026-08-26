@@ -1,5 +1,0 @@
-Retrieval-Augmented Generation (RAG) is a technique that enhances large language models (LLMs) by retrieving relevant information from a knowledge base before generating an answer. This reduces hallucinations.
-
-ChromaDB is an open-source vector database designed to store and retrieve vector embeddings efficiently. It runs entirely in-memory for testing, making it an excellent choice for local RAG development.
-
-In a RAG system, documents are first chunked into smaller pieces. Each piece is embedded and stored in a vector database. When a user asks a question, the system embeds the query and performs a similarity search.
