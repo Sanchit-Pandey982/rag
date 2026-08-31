@@ -267,7 +267,7 @@ class RAGSystem:
                 where={
                     "$and": [
                         {"user_id": user_id},
-                        {"document_id": document.document_id}
+                        {"document_id": document.document_id} 
                     ]
                 }
             )
@@ -388,7 +388,7 @@ Chunk: {chunk.metadata["chunk_index"]}
 {chunk.text}
 """.strip()
             )
-
+  
         return "\n\n".join(parts)
 
     # --------------------------------------------------------

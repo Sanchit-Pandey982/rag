@@ -1,0 +1,67 @@
+[
+    {
+        "id": "q1",
+        "user_id": "eval_user",
+        "question": "Why is retrieval used in RAG?",
+        "answerable": true,
+        "expected_document_ids": [
+            "rag_basics"
+        ],
+        "required_answer_terms": [
+            "retrieve",
+            "context"
+        ],
+        "expected_answer": "RAG retrieves relevant context before generating an answer.",
+        "history": []
+    },
+
+    {
+        "id": "q2",
+        "user_id": "eval_user",
+        "question": "What is an embedding?",
+        "answerable": true,
+        "expected_document_ids": [
+            "embeddings"
+        ],
+        "required_answer_terms": [
+            "vector"
+        ],
+        "expected_answer": "An embedding is a numerical vector representation of data.",
+        "history": []
+    },
+
+    {
+        "id": "q3",
+        "user_id": "eval_user",
+        "question": "Who won the 1998 football World Cup?",
+        "answerable": false,
+        "expected_document_ids": [],
+        "required_answer_terms": [],
+        "expected_answer": "I do not have enough information to answer that.",
+        "history": []
+    },
+
+    {
+        "id": "q4",
+        "user_id": "eval_user",
+        "question": "Why is it useful?",
+        "answerable": true,
+        "expected_document_ids": [
+            "embeddings"
+        ],
+        "required_answer_terms": [
+            "similarity"
+        ],
+        "expected_answer": "Embeddings allow semantically similar information to be compared.",
+        "history": [
+            {
+                "role": "user",
+                "content": "What is an embedding?"
+            },
+            {
+                "role": "assistant",
+                "content": "An embedding represents information as a numerical vector."
+            }
+        ]
+    }
+]
