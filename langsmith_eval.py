@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from langsmith import Client
 
 from phase1 import (
@@ -7,9 +9,11 @@ from phase1 import (
 
 
 DATASET_NAME = "rag-phase1-evaluation"
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 rag = RAGSystem(
-    collection_name="learning_rag"
+    collection_name="learning_rag",
+    chroma_path=str(PROJECT_ROOT / "chroma_data")
 )
 
 client = Client()
@@ -95,10 +99,18 @@ def refusal_evaluator(
         "to answer that."
     )
 
+    # Fix 4: an answerable case must be checked for answer quality; it is not
+    # automatically a correct refusal.
     if answerable:
         return {
-            "key": "correct_refusal",
-            "score": 1
+            "key": "answer_correct",
+            "score": int(
+                all(
+                    term.lower() in answer.lower()
+                    for term in reference_outputs.get("required_answer_terms", [])
+                )
+                and answer.strip() != refusal
+            )
         }
 
     return {
@@ -116,16 +128,21 @@ def refusal_evaluator(
 def create_dataset():
 
     cases = load_eval_cases(
-        "eval_cases.json"
+        PROJECT_ROOT / "eval_cases.json"
     )
 
-    dataset = client.create_dataset(
-        dataset_name=DATASET_NAME,
-        description=(
-            "Phase 1 RAG retrieval "
-            "and answer evaluation"
+    # Fix 13: reuse the named dataset so setup is safe to rerun.
+    dataset = next(iter(client.list_datasets(dataset_name=DATASET_NAME)), None)
+    created = dataset is None
+    if dataset is None:
+        dataset = client.create_dataset(
+            dataset_name=DATASET_NAME,
+            description="Phase 1 RAG retrieval and answer evaluation"
         )
-    )
+
+    # Fix 13: do not append duplicate examples when the dataset already exists.
+    if not created:
+        return dataset
 
     examples = []
 
@@ -147,7 +164,9 @@ def create_dataset():
                     case.expected_document_ids,
 
                 "answerable":
-                    case.answerable
+                    case.answerable,
+                "required_answer_terms":
+                    case.required_answer_terms
             }
         })
 
@@ -155,6 +174,7 @@ def create_dataset():
         dataset_id=dataset.id,
         examples=examples
     )
+    return dataset
 
 
 # ============================================================

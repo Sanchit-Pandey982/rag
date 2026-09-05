@@ -21,8 +21,18 @@ from langsmith import traceable
 # ============================================================
 
 load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parent
 
-gemini_client = genai.Client()
+# Fix 10: defer external-client construction until a request/explicit operation
+# needs it, so importing this module does not require credentials or networking.
+gemini_client = None
+
+
+def get_gemini_client():
+    global gemini_client
+    if gemini_client is None:
+        gemini_client = genai.Client()
+    return gemini_client
 
 EMBEDDING_MODEL = "gemini-embedding-2"
 GENERATION_MODEL = "gemini-3.6-flash"
@@ -81,7 +91,7 @@ def embed_documents(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
 
-    result = gemini_client.models.embed_content(
+    result = get_gemini_client().models.embed_content(
         model=EMBEDDING_MODEL,
         contents=texts,
         config=types.EmbedContentConfig(
@@ -98,7 +108,7 @@ def embed_documents(texts: list[str]) -> list[list[float]]:
 @traceable(run_type="embedding", name="embed_query")
 def embed_query(text: str) -> list[float]:
 
-    result = gemini_client.models.embed_content(
+    result = get_gemini_client().models.embed_content(
         model=EMBEDDING_MODEL,
         contents=text,
         config=types.EmbedContentConfig(
@@ -115,7 +125,9 @@ def embed_query(text: str) -> list[float]:
 
 def load_txt_documents(folder: str) -> list[Document]:
 
-    root = Path(folder)
+    # Fix 6: accept Path values and resolve the caller's configured location
+    # once, rather than silently depending on the current working directory.
+    root = Path(folder).expanduser().resolve()
 
     documents = []
 
@@ -132,6 +144,11 @@ def load_txt_documents(folder: str) -> list[Document]:
             .as_posix()
             .replace("/", "__")
         )
+
+        # Fix 3: normalize the historical file-name typo to the canonical ID
+        # used by eval_cases.json and downstream dashboards.
+        if document_id == "embeedings":
+            document_id = "embeddings"
 
         text = path.read_text(encoding="utf-8")
 
@@ -186,7 +203,7 @@ Latest question:
 Standalone question:
 """
 
-    response = gemini_client.models.generate_content(
+    response = get_gemini_client().models.generate_content(
         model=GENERATION_MODEL,
         contents=prompt
     )
@@ -210,6 +227,13 @@ class RAGSystem:
         reset: bool = False
     ):
 
+        # Fix 6: normalize the persistent-store path at construction time.
+        # Fix 6: relative storage paths are anchored to the project module,
+        # so Uvicorn and CLI invocations select the same database.
+        chroma_path_value = Path(chroma_path).expanduser()
+        if not chroma_path_value.is_absolute():
+            chroma_path_value = PROJECT_ROOT / chroma_path_value
+        chroma_path = str(chroma_path_value.resolve())
         self.client = chromadb.PersistentClient(
             path=chroma_path
         )
@@ -314,6 +338,14 @@ class RAGSystem:
         k: int = 3,
         distance_threshold: float | None = None
     ) -> list[RetrievedChunk]:
+
+        # Fix 7: protect non-HTTP callers (CLI/evaluation) with the same limits.
+        if not 1 <= k <= 10:
+            raise ValueError("k must be between 1 and 10")
+        if not query or len(query) > 4_000:
+            raise ValueError("query must contain 1-4000 characters")
+        if distance_threshold is not None and not 0 <= distance_threshold <= 2:
+            raise ValueError("distance_threshold must be between 0 and 2")
 
         query_vector = embed_query(query)
 
@@ -445,7 +477,7 @@ User question:
 Answer:
 """
 
-        response = gemini_client.models.generate_content(
+        response = get_gemini_client().models.generate_content(
             model=GENERATION_MODEL,
             contents=prompt
         )
@@ -455,6 +487,69 @@ Answer:
             if response.text
             else REFUSAL_MESSAGE
         )
+
+    @traceable(
+    run_type="llm",
+    name="generate_answer_stream",
+    reduce_fn=lambda chunks: "".join(chunks)
+    )
+    def generate_answer_stream(
+        self,
+        question: str,
+        chunks: list[RetrievedChunk],
+        chat_history: list[dict]
+    ):
+
+        if not chunks:
+            yield REFUSAL_MESSAGE
+            return
+
+        context = self.build_context(chunks)
+
+        recent_history = chat_history[-8:]
+
+        history_text = "\n".join(
+            f"{message['role']}: {message['content']}"
+            for message in recent_history
+        )
+
+        prompt = f"""
+    You are a retrieval-augmented assistant.
+
+    RULES:
+
+    1. Answer using ONLY information supported by the retrieved context.
+    2. Chat history may help understand the conversation, but it is NOT
+    a factual source.
+    3. Never invent missing details.
+    4. If the context does not contain enough information, respond exactly:
+    "{REFUSAL_MESSAGE}"
+    5. When possible, cite the source as [Source 1], [Source 2], etc.
+
+    Retrieved context:
+
+    {context}
+
+    Conversation history:
+
+    {history_text}
+
+    User question:
+
+    {question}
+
+    Answer:
+    """
+
+        stream = gemini_client.models.generate_content_stream(
+            model=GENERATION_MODEL,
+            contents=prompt
+        )
+
+        for chunk in stream:
+
+            if chunk.text:
+                yield chunk.text
 
     # --------------------------------------------------------
     # COMPLETE PIPELINE
@@ -466,7 +561,7 @@ Answer:
         user_id: str,
         chat_history: list[dict] | None = None,
         k: int = 3,
-        rewrite_query: bool = True,
+        rewrite_query: bool = False,
         distance_threshold: float | None = None
     ) -> dict:
 
@@ -508,6 +603,42 @@ Answer:
                 for chunk in chunks
             ]
         }
+    def run_once_stream(
+        self,
+        raw_query: str,
+        user_id: str,
+        chat_history: list[dict] | None = None,
+        k: int = 3,
+        rewrite_query: bool = True,
+        distance_threshold: float | None = None
+    ):
+
+        if chat_history is None:
+            chat_history = []
+
+        if rewrite_query:
+
+            retrieval_query = condense_question(
+                chat_history,
+                raw_query
+            )
+
+        else:
+
+            retrieval_query = raw_query
+
+        chunks = self.retrieve(
+            query=retrieval_query,
+            user_id=user_id,
+            k=k,
+            distance_threshold=distance_threshold
+        )
+
+        yield from self.generate_answer_stream(
+            question=raw_query,
+            chunks=chunks,
+            chat_history=chat_history
+        )
 
 
 # ============================================================
@@ -971,7 +1102,8 @@ def main():
 
     USER_ID = "eval_user"
 
-    documents = load_txt_documents("./data")
+    # Fix 6: use a project-anchored corpus path for the standalone demo.
+    documents = load_txt_documents(PROJECT_ROOT / "data")
 
     rag = RAGSystem(
         collection_name="learning_rag",
@@ -986,7 +1118,7 @@ def main():
     )
 
     evaluation_cases = load_eval_cases(
-        "eval_cases.json"
+        PROJECT_ROOT / "eval_cases.json"
     )
 
     # --------------------------------------------------------

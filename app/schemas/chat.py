@@ -1,30 +1,36 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 
 class ChatMessage(BaseModel):
-    role: str
-    content: str
+    # Fix 7: bound message fields and reject arbitrary roles at the API boundary.
+    role: Literal["user", "assistant", "system"]
+    content: str = Field(min_length=1, max_length=8_000)
 
 
 class ChatRequest(BaseModel):
-    raw_query: str = Field(min_length=1)
+    # Fix 7: enforce practical limits for prompt size and history memory usage.
+    raw_query: str = Field(min_length=1, max_length=4_000)
 
-    user_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1, max_length=256)
 
     chat_history: list[ChatMessage] = Field(
-        default_factory=list
+        default_factory=list,
+        max_length=20
     )
 
     k: int = Field(
         default=3,
-        ge=1
+        ge=1,
+        le=10
     )
 
-    rewrite_query: bool = True
+    # Fix 8: avoid an extra Gemini rewrite call unless the caller opts in.
+    rewrite_query: bool = False
 
-    distance_threshold: float | None = None
+    # Fix 7: cosine distance is non-negative and bounded to a meaningful range.
+    distance_threshold: float | None = Field(default=None, ge=0, le=2)
 
 
 class RetrievedChunkResponse(BaseModel):
