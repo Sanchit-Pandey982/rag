@@ -541,7 +541,7 @@ Answer:
     Answer:
     """
 
-        stream = gemini_client.models.generate_content_stream(
+        stream = get_gemini_client().models.generate_content_stream(
             model=GENERATION_MODEL,
             contents=prompt
         )
@@ -639,6 +639,114 @@ Answer:
             chunks=chunks,
             chat_history=chat_history
         )
+    def run_once_event_stream(
+        self,
+        raw_query: str,
+        user_id: str,
+        chat_history: list[dict] | None = None,
+        k: int = 3,
+        rewrite_query: bool = True,
+        distance_threshold: float | None = None
+    ):
+
+        if chat_history is None:
+            chat_history = []
+
+        # --------------------------------------------
+        # 1. Tell the client that the stream started
+        # --------------------------------------------
+
+        yield {
+            "event": "start",
+            "data": {
+                "raw_query": raw_query
+            }
+        }
+
+        # --------------------------------------------
+        # 2. Query rewriting
+        # --------------------------------------------
+
+        if rewrite_query:
+            retrieval_query = condense_question(
+                chat_history,
+                raw_query
+            )
+        else:
+            retrieval_query = raw_query
+
+        # --------------------------------------------
+        # 3. Retrieval
+        # --------------------------------------------
+
+        chunks = self.retrieve(
+            query=retrieval_query,
+            user_id=user_id,
+            k=k,
+            distance_threshold=distance_threshold
+        )
+
+        retrieved_document_ids = [
+            chunk.metadata["document_id"]
+            for chunk in chunks
+        ]
+
+        yield {
+            "event": "retrieval",
+            "data": {
+                "retrieval_query": retrieval_query,
+                "retrieved_document_ids": retrieved_document_ids
+            }
+        }
+
+        # --------------------------------------------
+        # 4. Generation streaming
+        # --------------------------------------------
+
+        for text in self.generate_answer_stream(
+            question=raw_query,
+            chunks=chunks,
+            chat_history=chat_history
+        ):
+
+            yield {
+                "event": "token",
+                "data": {
+                    "text": text
+                }
+            }
+
+        # --------------------------------------------
+        # 5. Source metadata
+        # --------------------------------------------
+
+        sources = [
+            {
+                "chunk_id": chunk.chunk_id,
+                "document_id": chunk.metadata["document_id"],
+                "source": chunk.metadata["source"],
+                "title": chunk.metadata["title"],
+                "chunk_index": chunk.metadata["chunk_index"],
+                "distance": chunk.distance
+            }
+            for chunk in chunks
+        ]
+
+        yield {
+            "event": "sources",
+            "data": {
+                "sources": sources
+            }
+        }
+
+        # --------------------------------------------
+        # 6. Normal completion
+        # --------------------------------------------
+
+        yield {
+            "event": "done",
+            "data": {}
+        }
 
 
 # ============================================================

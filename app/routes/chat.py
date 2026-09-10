@@ -1,5 +1,9 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
+from fastapi.sse import (
+    EventSourceResponse,
+    ServerSentEvent
+)
 
 from app.schemas.chat import (
     ChatRequest,
@@ -52,3 +56,25 @@ def chat_stream(
         content=stream,
         media_type="text/plain"
     )
+
+@router.post(
+    "/chat/sse",
+    response_class=EventSourceResponse
+)
+def chat_sse(
+    payload: ChatRequest,
+    request: Request
+):
+
+    rag_service = request.app.state.rag_service
+
+    event_stream = rag_service.run_once_event_stream(
+        payload
+    )
+
+    for item in event_stream:
+
+        yield ServerSentEvent(
+            event=item["event"],
+            data=item["data"]
+        )

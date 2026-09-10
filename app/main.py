@@ -9,6 +9,33 @@ from app.routes.chat import router as chat_router
 from app.services.rag_services import RAGService
 
 
+def directory_accepts_writes(path: Path) -> bool:
+    probe = path / ".write_probe"
+
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe.write_text("ok", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def get_chroma_path(project_root: Path) -> Path:
+    primary_path = project_root / "chroma_data"
+
+    if directory_accepts_writes(primary_path):
+        return primary_path
+
+    fallback_path = project_root / "runtime_chroma_data"
+    fallback_path.mkdir(parents=True, exist_ok=True)
+    return fallback_path
+
+
 @asynccontextmanager
 async def lifespan(
     app: FastAPI
@@ -18,7 +45,7 @@ async def lifespan(
     project_root = Path(__file__).resolve().parents[1]
     rag = RAGSystem(
         collection_name="learning_rag",
-        chroma_path=str(project_root / "chroma_data"),
+        chroma_path=str(get_chroma_path(project_root)),
         reset=False
     )
 

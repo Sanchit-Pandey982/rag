@@ -50,3 +50,23 @@ class RAGService:
             rewrite_query=request.rewrite_query,
             distance_threshold=request.distance_threshold
         )
+
+
+    def run_once_event_stream(
+        self,
+        request: ChatRequest
+    ):
+
+        chat_history = [
+            message.model_dump()
+            for message in request.chat_history
+        ]
+
+        return self.rag.run_once_event_stream(
+            raw_query=request.raw_query,
+            user_id=request.user_id,
+            chat_history=chat_history,
+            k=request.k,
+            rewrite_query=request.rewrite_query,
+            distance_threshold=request.distance_threshold
+        )
