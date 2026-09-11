@@ -49,6 +49,71 @@ test("reports premature EOF while preserving already dispatched tokens", async (
   assert.equal(events[0].data.text, "Partial");
 });
 
+for (const stage of ["retrieval", "generation"]) {
+  test(`dispatches ${stage} failure separately and stops before later tokens or done`, async (t) => {
+    const events = [];
+    const partial = stage === "generation" ? encode("token", { text: "Partial" }) : "";
+    mockStream(t, partial + encode("error", {
+      stage, message: "The response could not be completed.",
+    }) + encode("token", { text: "Must be ignored" }) + encode("done", {}), 1000);
+
+    await streamChat({ ...payload, onEvent: (event) => events.push(event) });
+    const expected = stage === "generation" ? ["token", "error"] : ["error"];
+    assert.deepEqual(events.map(({ event }) => event), expected);
+    assert.equal(events.at(-1).data.stage, stage);
+  });
+}
+
+test("error ends consumption even when the server leaves the connection open", async (t) => {
+  let cancelled = false;
+  t.mock.method(globalThis, "fetch", async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(encode("error", {
+        stage: "retrieval", message: "The response could not be completed.",
+      })));
+    },
+    cancel() { cancelled = true; },
+  }), { headers: { "content-type": "text/event-stream" } }));
+  await streamChat({ ...payload, onEvent() {} });
+  assert.equal(cancelled, true);
+});
+
+test("EOF after error is an application failure rather than an incomplete stream", async (t) => {
+  mockStream(t, 'event: error\ndata: {"stage":"retrieval","message":"The response could not be completed."}');
+  const events = [];
+  await streamChat({ ...payload, onEvent: (event) => events.push(event) });
+  assert.deepEqual(events.map(({ event }) => event), ["error"]);
+});
+
+test("network failure preserves tokens and never dispatches done or application error", async (t) => {
+  let streamController;
+  t.mock.method(globalThis, "fetch", async () => new Response(new ReadableStream({
+    start(controller) {
+      streamController = controller;
+      controller.enqueue(new TextEncoder().encode(encode("token", { text: "Partial" })));
+    },
+  }), { headers: { "content-type": "text/event-stream" } }));
+  const events = [];
+  await assert.rejects(streamChat({ ...payload, onEvent(event) {
+    events.push(event);
+    streamController.error(new TypeError("Network connection lost"));
+  } }), /Network connection lost/);
+  assert.deepEqual(events.map(({ event }) => event), ["token"]);
+});
+
+test("checks HTTP failure before acquiring a reader and hides server exception details", async (t) => {
+  let readerOpened = false;
+  const response = new Response(JSON.stringify({ detail: "private database exception" }), { status: 500 });
+  t.mock.method(response.body, "getReader", () => { readerOpened = true; });
+  t.mock.method(globalThis, "fetch", async () => response);
+  await assert.rejects(streamChat({ ...payload, onEvent() {} }), (error) => {
+    assert.match(error.message, /500/);
+    assert.doesNotMatch(error.message, /private database exception/);
+    return true;
+  });
+  assert.equal(readerOpened, false);
+});
+
 test("rejects malformed JSON and invalid token payload", async (t) => {
   mockStream(t, "event: token\ndata: nope\n\n");
   await assert.rejects(streamChat({ ...payload, onEvent() {} }), /invalid JSON/);

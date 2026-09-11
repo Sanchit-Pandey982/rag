@@ -85,6 +85,50 @@ test("retains a partial answer, allows retry and excludes failed history", async
   await expect(page.locator(".chat-panel:not([hidden])").getByText("Response complete", { exact: true })).toBeVisible();
 });
 
+for (const stage of ["retrieval", "generation"]) {
+  test(`${stage} error shows application failure and keeps it out of answer text and history`, async ({ page }) => {
+    let calls = 0;
+    await page.route("**/api/v1/chat/sse", (route) => {
+      calls += 1;
+      if (calls > 1) {
+        expect(route.request().postDataJSON().chat_history).toEqual([]);
+        return route.fulfill({ contentType: "text/event-stream", body: response });
+      }
+      let body = sse("start", { raw_query: "Question" });
+      if (stage === "generation") {
+        body += sse("retrieval", { retrieval_query: "Question", retrieved_document_ids: [] });
+        body += sse("token", { text: "Partial answer" });
+      }
+      body += sse("error", { stage, message: "The response could not be completed." });
+      return route.fulfill({ contentType: "text/event-stream", body });
+    });
+    await page.goto("/");
+    await page.getByRole("textbox", { name: "Ask your knowledge a question" }).fill("Question");
+    await page.getByRole("button", { name: "Send question" }).click();
+    await expect(page.getByRole("alert")).toHaveText("The response could not be completed.");
+    await expect(page.getByText("Response complete", { exact: true })).toHaveCount(0);
+    if (stage === "generation") {
+      await expect(page.locator(".markdown")).toHaveText("Partial answer");
+    } else {
+      await expect(page.locator(".markdown")).toHaveCount(0);
+    }
+    await page.getByRole("button", { name: "Retry question" }).click();
+    await expect(page.locator(".chat-panel:not([hidden])").getByText("Response complete", { exact: true })).toBeVisible();
+  });
+}
+
+test("HTTP status failure shows a generic UI error", async ({ page }) => {
+  await page.route("**/api/v1/chat/sse", (route) => route.fulfill({
+    status: 500, json: { detail: "private database exception" },
+  }));
+  await page.goto("/");
+  await page.getByRole("textbox", { name: "Ask your knowledge a question" }).fill("Question");
+  await page.getByRole("button", { name: "Send question" }).click();
+  await expect(page.getByRole("alert")).toContainText("Chat request failed (500)");
+  await expect(page.getByRole("alert")).not.toContainText("private database exception");
+  await expect(page.getByRole("button", { name: "Retry question" })).toBeVisible();
+});
+
 test("stop cancels a pending request and restores the composer", async ({ page }) => {
   let release;
   const pending = new Promise((resolve) => { release = resolve; });

@@ -13,11 +13,17 @@ export async function streamChat({
 
   if (!response.ok) {
     let detail = "";
-    try {
-      const body = await response.json();
-      detail = typeof body.detail === "string" ? body.detail :
-        Array.isArray(body.detail) ? body.detail.map((item) => `${item.loc?.join(".")}: ${item.msg}`).join("; ") : "";
-    } catch { /* Proxy errors may have no JSON body. */ }
+    // Validation messages are useful, but server exceptions stay on the backend.
+    if (response.status === 422) {
+      try {
+        const body = await response.json();
+        if (Array.isArray(body.detail)) {
+          detail = body.detail.map((item) => `${item.loc?.join(".")}: ${item.msg}`).join("; ");
+        }
+      } catch {
+        // Proxy errors may have no JSON body.
+      }
+    }
     throw new Error(`Chat request failed (${response.status}).${detail ? ` ${detail}` : " Check the API connection and try again."}`);
   }
   if (!response.headers.get("content-type")?.includes("text/event-stream")) {
@@ -28,23 +34,33 @@ export async function streamChat({
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
-  let completed = false;
+  let doneReceived = false;
+  let errorReceived = false;
 
   function dispatch(rawEvent) {
     const parsed = parseSSEEvent(rawEvent);
-    if (!parsed) return;
-    if (parsed.event === "error") {
-      throw new Error(typeof parsed.data?.message === "string" ? parsed.data.message : "The server could not complete this response.");
+    if (!parsed) {
+      return;
     }
+    if (parsed.event === "done") {
+      doneReceived = true;
+    }
+    if (parsed.event === "error") {
+      errorReceived = true;
+    }
+    // Application failures reach the semantic handler just like other events.
+    // Transport and parsing failures reject streamChat and reach its catch block.
     onEvent(parsed);
-    if (parsed.event === "done") completed = true;
   }
 
   function drain() {
     // Normalize the accumulated buffer: CRLF may be split across network reads.
     buffer = buffer.replace(/\r\n/g, "\n");
-    let boundary;
-    while (!completed && (boundary = buffer.indexOf("\n\n")) !== -1) {
+    while (!doneReceived && !errorReceived) {
+      const boundary = buffer.indexOf("\n\n");
+      if (boundary === -1) {
+        break;
+      }
       const rawEvent = buffer.slice(0, boundary);
       buffer = buffer.slice(boundary + 2);
       dispatch(rawEvent);
@@ -52,21 +68,28 @@ export async function streamChat({
   }
 
   try {
-    while (!completed) {
+    while (!doneReceived && !errorReceived) {
+      signal?.throwIfAborted();
       const { value, done } = await reader.read();
       signal?.throwIfAborted();
       if (done) {
         buffer += decoder.decode();
         drain();
-        if (!completed && buffer.trim()) dispatch(buffer);
-        if (!completed) throw new Error("The connection ended before the answer was complete. You can retry this question.");
+        if (!doneReceived && !errorReceived && buffer.trim()) dispatch(buffer);
+        if (!doneReceived && !errorReceived) {
+          throw new Error("The connection ended before the answer was complete. You can retry this question.");
+        }
         break;
       }
       buffer += decoder.decode(value, { stream: true });
       drain();
     }
   } finally {
-    try { await reader.cancel(); } catch { /* Abort can already have closed it. */ }
+    try {
+      await reader.cancel();
+    } catch {
+      // Abort can already have closed the reader.
+    }
     reader.releaseLock();
   }
 }

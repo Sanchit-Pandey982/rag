@@ -175,6 +175,13 @@ export default function ChatWindow({
         setStreamStatus("done");
         updateMessage(assistantMessageId, { status: "done", elapsed: performance.now() - startedAt });
         break;
+      case "error":
+        setStreamStatus("error");
+        updateMessage(assistantMessageId, {
+          status: "error",
+          error: "The response could not be completed.",
+        });
+        break;
     }
   }
 

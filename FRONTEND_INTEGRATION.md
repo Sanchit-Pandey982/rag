@@ -2,7 +2,7 @@
 
 This guide follows **architecture → request/data flow → engineering reasoning → implementation/code**. It documents the actual checkout, not an assumed phase plan. The earlier phase/feature list was not included in the request, so the frontend gaps in REACT_UI_ARCHITECTURE.md were used as the implementation scope.
 
-Only frontend code and documentation were changed. Existing Python changes in the worktree belong to your earlier work. No backend service, ingestion job, model call, or database mutation was run for this UI implementation.
+The streaming flow now includes backend stage-aware error handling and a Gemini client timeout. See [STREAMING_ARCHITECTURE.md](STREAMING_ARCHITECTURE.md) for the current error, completion, cancellation, and test contracts.
 
 ## 1. Architecture
 
@@ -97,12 +97,13 @@ The textarea's browser maxLength counts UTF-16 code units, making its 4,000 limi
 | token | text | Appends text to the assistant answer |
 | sources | sources array | Renders expandable source cards |
 | done | {} | Marks answer complete and ends reader consumption |
+| error | stage, message | Marks application failure, keeps partial answer text, and ends reader consumption |
 
 Each sources entry currently contains chunk_id, document_id, source, title, chunk_index, and distance. The UI displays these fields exactly; it does not infer document content, file download URLs, or confidence percentages. Duplicate document IDs can correspond to separate retrieved chunks.
 
-The decoder tolerates fragmented UTF-8, CRLF boundaries split between reads, multiline data, heartbeat comments, and an unterminated final event. Unknown event types are ignored. Malformed known events and EOF without done are surfaced as errors.
+The decoder tolerates fragmented UTF-8, CRLF boundaries split between reads, multiline data, heartbeat comments, and an unterminated final event. Unknown event types are ignored. Malformed known events and EOF without either done or error are surfaced as errors.
 
-The client also defensively understands an error event with a message. **The backend does not currently emit that event.** This does not imply an implemented server error protocol.
+The backend emits an additive error event on application failure. It logs the stage and traceback on the backend and sends only the stage and a generic message. React handles this event separately from tokens; only done marks success.
 
 ## 3. Engineering reasoning
 
@@ -190,7 +191,7 @@ These are integration work areas inferred from the current repository and your l
 | Authentication and tenancy | Verify identity; enforce ownership for retrieval, ingestion, and document reads; bind or validate user_id | Replace development identity selection in App with authenticated context while keeping the current request contract compatible | User A cannot request user B's corpus or stored conversations |
 | Document ingestion | Define authenticated upload, indexing status, document listing, and deletion contracts; process ingestion jobs | Add knowledge UI after contracts are agreed; source cards already use document_id and chunk_id | Upload progresses to searchable content; failures are actionable; deletes remove access |
 | Conversation persistence | Design authorized conversation/message storage and its retrieval contract; make turn completion and retry semantics explicit | Lift/load ChatWindow messages through the future storage adapter; preserve message rendering and stream handlers | Reload restores the right user's history; failed attempts remain distinguishable |
-| Streaming resilience | Catch generator failures; define any error-event payload; propagate disconnects; set server deadlines and resource limits | Existing error, stopped, retry, and incomplete-stream states | Disconnect releases resources; concurrent requests remain isolated; errors are observable |
+| Streaming resilience | Stage-aware error events and Gemini HTTP timeout are implemented; immediate cancellation of upstream work, total pipeline deadlines, and resource limits remain separate work | Existing error, stopped, retry, and incomplete-stream states | Disconnect releases resources; concurrent requests remain isolated; errors are observable |
 | Evaluation | Extend existing eval_cases.json and langsmith_eval.py workflows with suitable fixtures and metrics | Add results UI only after a real result query contract exists | Groundedness/retrieval regressions are measurable using deterministic corpus ownership |
 | Observability | Correlate API request, rewrite, retrieval, generation, and stream lifecycle; record durations/errors with appropriate redaction | Connect future trace metadata to the existing retrieval details area | A failed user turn can be traced across layers; sensitive text isn't exposed indiscriminately |
 | Deployment | Serve frontend assets and proxy existing API routes; preserve streaming; enforce credentials, limits, timeouts, and readiness | Same relative browser URLs can remain | Real incremental delivery, cancellation, readiness routing, and cross-user tests pass under load |
