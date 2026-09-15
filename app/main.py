@@ -1,11 +1,16 @@
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from pymongo import AsyncMongoClient
 
 from phase1 import RAGSystem, load_txt_documents
 
+from app.routes.auth import router as auth_router
 from app.routes.chat import router as chat_router
+from app.security.jwt import JWTService
+from app.services.auth_service import AuthService
 from app.services.rag_services import RAGService
 
 
@@ -40,32 +45,50 @@ def get_chroma_path(project_root: Path) -> Path:
 async def lifespan(
     app: FastAPI
 ):
-    # Fix 1/6: resolve project data from this file, ingest a missing corpus, and
-    # expose readiness state instead of depending on the process working dir.
-    project_root = Path(__file__).resolve().parents[1]
-    rag = RAGSystem(
-        collection_name="learning_rag",
-        chroma_path=str(get_chroma_path(project_root)),
-        reset=False
+    # Fail before opening external resources if JWT configuration is invalid.
+    app.state.ready = False
+    app.state.jwt_service = JWTService.from_environment()
+    # One MongoDB client per application lifespan, shared by all auth requests.
+    # Configure these in the environment or the existing project .env file.
+    mongo_client = AsyncMongoClient(
+        os.getenv("MONGODB_URI", "mongodb://localhost:27017"),
+        serverSelectionTimeoutMS=5_000,
+        tz_aware=True,
     )
-
-    if rag.collection.count() == 0:
-        documents = load_txt_documents(project_root / "data")
-        rag.ingest_documents(documents, user_id="eval_user")
-
-    app.state.rag_service = RAGService(
-        rag=rag
-    )
-    app.state.ready = rag.collection.count() > 0
+    rag = None
 
     try:
+        await mongo_client.admin.command("ping")
+        database = mongo_client[os.getenv("MONGODB_DATABASE", "agent")]
+        auth_service = AuthService(database["users"])
+        await auth_service.ensure_indexes()
+        app.state.auth_service = auth_service
+
+        # Preserve existing RAG construction, ingestion, and readiness behavior.
+        project_root = Path(__file__).resolve().parents[1]
+        rag = RAGSystem(
+            collection_name="learning_rag",
+            chroma_path=str(get_chroma_path(project_root)),
+            reset=False
+        )
+
+        if rag.collection.count() == 0:
+            documents = load_txt_documents(project_root / "data")
+            rag.ingest_documents(documents, user_id="eval_user")
+
+        app.state.rag_service = RAGService(rag=rag)
+        app.state.ready = rag.collection.count() > 0
         yield
     finally:
-        # Fix 11: make lifespan ownership explicit and close clients that expose
-        # a supported close API without assuming Chroma has one.
-        close = getattr(rag.client, "close", None)
-        if callable(close):
-            close()
+        app.state.ready = False
+        try:
+            if rag is not None:
+                close = getattr(rag.client, "close", None)
+                if callable(close):
+                    close()
+        finally:
+            # Also close MongoDB when ping, indexes, or RAG startup fails.
+            await mongo_client.close()
 
 
 app = FastAPI(
@@ -78,6 +101,7 @@ app = FastAPI(
 app.include_router(
     chat_router
 )
+app.include_router(auth_router)
 
 
 @app.get("/health")
