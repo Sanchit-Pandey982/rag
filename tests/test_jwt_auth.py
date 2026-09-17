@@ -16,9 +16,12 @@ import jwt
 
 from app.routes.auth import router
 from app.security.jwt import AccessTokenError, JWTService
+from app.security.cookies import RefreshCookieSettings
+from app.services.refresh_token_service import RefreshTokenService
 from app.security.passwords import hash_password
 from app.services.auth_service import AuthService
 from test_auth import InMemoryUsers
+from redis_double import InMemoryRedis
 
 
 class JWTTests(unittest.TestCase):
@@ -90,6 +93,8 @@ class AccessTokenRouteTests(unittest.TestCase):
         self.app = FastAPI()
         self.app.state.auth_service = self.auth_service
         self.app.state.jwt_service = self.jwt_service
+        self.app.state.refresh_token_service = RefreshTokenService(InMemoryRedis())
+        self.app.state.refresh_cookie_settings = RefreshCookieSettings(secure=False)
         self.app.include_router(router)
         self.client = self.enterContext(TestClient(self.app))
         self.token = self.jwt_service.create_access_token(self.users.documents[0]["user_id"])

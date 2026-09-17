@@ -4,14 +4,19 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pymongo import AsyncMongoClient
+import redis.asyncio as redis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 
 from phase1 import RAGSystem, load_txt_documents
 
 from app.routes.auth import router as auth_router
 from app.routes.chat import router as chat_router
 from app.security.jwt import JWTService
+from app.security.cookies import RefreshCookieSettings
 from app.services.auth_service import AuthService
 from app.services.rag_services import RAGService
+from app.services.refresh_token_service import RefreshTokenService
 
 
 def directory_accepts_writes(path: Path) -> bool:
@@ -48,6 +53,7 @@ async def lifespan(
     # Fail before opening external resources if JWT configuration is invalid.
     app.state.ready = False
     app.state.jwt_service = JWTService.from_environment()
+    app.state.refresh_cookie_settings = RefreshCookieSettings.from_environment()
     # One MongoDB client per application lifespan, shared by all auth requests.
     # Configure these in the environment or the existing project .env file.
     mongo_client = AsyncMongoClient(
@@ -56,8 +62,21 @@ async def lifespan(
         tz_aware=True,
     )
     rag = None
+    redis_client = None
 
     try:
+        redis_client = redis.from_url(
+            os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+            # GETDEL cannot be transparently retried after an ambiguous timeout.
+            retry=Retry(NoBackoff(), 0),
+        )
+        await redis_client.ping()
+        app.state.redis_client = redis_client
+        app.state.refresh_token_service = RefreshTokenService(redis_client)
+
         await mongo_client.admin.command("ping")
         database = mongo_client[os.getenv("MONGODB_DATABASE", "agent")]
         auth_service = AuthService(database["users"])
@@ -87,8 +106,12 @@ async def lifespan(
                 if callable(close):
                     close()
         finally:
-            # Also close MongoDB when ping, indexes, or RAG startup fails.
-            await mongo_client.close()
+            try:
+                if redis_client is not None:
+                    await redis_client.aclose()
+            finally:
+                # Close every resource even if another cleanup or startup failed.
+                await mongo_client.close()
 
 
 app = FastAPI(

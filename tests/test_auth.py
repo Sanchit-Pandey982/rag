@@ -24,6 +24,7 @@ from app.schemas.auth import UserResponse
 from app.security.passwords import DUMMY_PASSWORD_HASH, hash_password, verify_password
 from app.security.jwt import JWTService
 from app.services.auth_service import AuthService, UsernameAlreadyExistsError
+from redis_double import InMemoryRedis
 
 
 class InMemoryUsers:
@@ -262,6 +263,8 @@ class AuthLifespanTests(unittest.IsolatedAsyncioTestCase):
         from app import main
 
         self.main = main
+        self.redis = InMemoryRedis()
+        self.redis_factory = self.enterContext(patch.object(main.redis, "from_url", return_value=self.redis))
         self.users = InMemoryUsers()
         self.mongo = MagicMock()
         self.mongo.admin.command = AsyncMock()
@@ -279,6 +282,8 @@ class AuthLifespanTests(unittest.IsolatedAsyncioTestCase):
             "JWT_SECRET_KEY": token_urlsafe(32),
             "JWT_ISSUER": "test-issuer",
             "JWT_AUDIENCE": "test-audience",
+            "REDIS_URL": "redis://test-redis:6379/0",
+            "REFRESH_COOKIE_SECURE": "false",
         }))
         self.app = FastAPI()
 
@@ -295,6 +300,14 @@ class AuthLifespanTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_startup_initializes_services_and_shutdown_closes_clients(self):
         async with self.main.lifespan(self.app):
+            self.redis_factory.assert_called_once()
+            self.assertEqual(self.redis_factory.call_args.args, ("redis://test-redis:6379/0",))
+            self.assertTrue(self.redis_factory.call_args.kwargs["decode_responses"])
+            self.assertEqual(self.redis_factory.call_args.kwargs["retry"].get_retries(), 0)
+            self.redis.ping.assert_awaited_once()
+            self.assertIs(self.app.state.redis_client, self.redis)
+            self.assertIs(self.app.state.refresh_token_service.redis_client, self.redis)
+            self.redis.aclose.assert_not_awaited()
             self.mongo_class.assert_called_once_with(
                 "mongodb://test-host:27017", serverSelectionTimeoutMS=5_000, tz_aware=True
             )
@@ -311,6 +324,7 @@ class AuthLifespanTests(unittest.IsolatedAsyncioTestCase):
             self.mongo.close.assert_not_awaited()
         self.mongo.close.assert_awaited_once()
         self.rag.client.close.assert_called_once()
+        self.redis.aclose.assert_awaited_once()
         self.assertFalse(self.app.state.ready)
 
     async def test_existing_empty_corpus_is_still_ingested(self):
@@ -393,6 +407,25 @@ class AuthLifespanTests(unittest.IsolatedAsyncioTestCase):
             async with self.main.lifespan(self.app):
                 pass
         self.mongo.close.assert_awaited_once()
+        self.redis.aclose.assert_awaited_once()
+
+    async def test_redis_ping_failure_closes_clients_and_prevents_serving(self):
+        self.redis.ping.side_effect = RuntimeError("redis unavailable")
+        with self.assertRaisesRegex(RuntimeError, "redis unavailable"):
+            async with self.main.lifespan(self.app):
+                self.fail("Startup must fail")
+        self.redis.aclose.assert_awaited_once()
+        self.mongo.close.assert_awaited_once()
+        self.rag_class.assert_not_called()
+        self.assertFalse(self.app.state.ready)
+
+    async def test_redis_close_failure_still_closes_mongo(self):
+        self.redis.aclose.side_effect = RuntimeError("redis close failed")
+        with self.assertRaisesRegex(RuntimeError, "redis close failed"):
+            async with self.main.lifespan(self.app):
+                pass
+        self.mongo.close.assert_awaited_once()
+        self.rag.client.close.assert_called_once()
 
 
 if __name__ == "__main__":
