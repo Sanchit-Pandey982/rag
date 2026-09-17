@@ -6,7 +6,6 @@ import ConnectionStatus from "./components/ConnectionStatus.jsx";
 const newConversation = () => ({ id: crypto.randomUUID(), title: "New conversation" });
 
 const integrationItems = [
-  ["Identity & access", "Connect authenticated identity to user_id and enforce ownership in the API. The current user selector is a development control."],
   ["Knowledge ingestion", "Connect document upload, indexing progress, and document management after their backend contracts exist."],
   ["Conversation storage", "Persist and restore conversations through authenticated backend storage. Current conversations live in this tab until refresh."],
   ["Evaluation & observability", "Connect evaluation runs and server traces. Retrieval details shown in chat already come from existing SSE events."],
@@ -16,6 +15,7 @@ const integrationItems = [
 export default function App() {
   const [user_id, setUserId] = useState("eval_user");
   const [userDraft, setUserDraft] = useState("eval_user");
+  const [access_token, setAccessToken] = useState("");
   const [k, setK] = useState(3);
   const [rewrite_query, setRewriteQuery] = useState(false);
   const [distance_threshold, setDistanceThreshold] = useState(null);
@@ -78,7 +78,7 @@ export default function App() {
       {page === "chat" && conversations.length > 1 && <div className="mobile-conversations"><label htmlFor="active-conversation">Conversation</label><select id="active-conversation" value={selectedId} onChange={(event) => setActiveId(event.target.value)}>{conversations.map((conversation) => <option key={conversation.id} value={conversation.id}>{conversation.title}</option>)}</select></div>}
       <div className="chat-panels" hidden={page !== "chat"}>
         {conversations.map((conversation) => <div className="chat-panel" key={conversation.id} hidden={conversation.id !== selectedId}>
-          <ChatWindow user_id={user_id} chat_history={[]} k={k} rewrite_query={rewrite_query} distance_threshold={distance_threshold}
+          <ChatWindow user_id={user_id} access_token={access_token} chat_history={[]} k={k} rewrite_query={rewrite_query} distance_threshold={distance_threshold}
             active={page === "chat" && selectedId === conversation.id}
             onBusyChange={(value) => setBusyById((previous) => ({ ...previous, [conversation.id]: value }))}
             onTitle={(title) => setConversations((previous) => previous.map((item) => item.id === conversation.id ? { ...item, title } : item))} />
@@ -97,6 +97,11 @@ export default function App() {
       <div className="inspector-title"><span><Settings2 size={17} /> Retrieval settings</span><button className="close-settings icon-button" aria-label="Close retrieval settings" onClick={() => setSettingsOpen(false)}><X size={18} /></button></div>
       <div className="inspector-content">
         <div className="inspector-section"><span className="eyebrow">CONNECTION</span><ConnectionStatus /><p className="helper">Live status from your API. Checked every 30 seconds.</p></div>
+        <div className="inspector-section">
+          <label className="field-label" htmlFor="access-token">Access token</label>
+          <input id="access-token" type="password" autoComplete="off" spellCheck={false} value={access_token} disabled={busy} onChange={(event) => setAccessToken(event.target.value.trim())} />
+          <p className="helper">Paste the access token returned by login. It stays in memory until refresh. User context must match the signed-in account's user ID.</p>
+        </div>
         <form className="inspector-section" onSubmit={changeUser}>
           <label className="field-label" htmlFor="user-id">User context <code>user_id</code></label>
           <input id="user-id" value={userDraft} maxLength={256} required disabled={busy} onChange={(event) => setUserDraft(event.target.value)} />

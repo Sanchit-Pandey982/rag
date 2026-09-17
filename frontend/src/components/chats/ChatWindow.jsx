@@ -63,7 +63,7 @@ function Message({ message, onRetry, isStreaming }) {
 }
 
 export default function ChatWindow({
-  user_id, chat_history = [], k = 3, rewrite_query = false, distance_threshold = null,
+  user_id, access_token, chat_history = [], k = 3, rewrite_query = false, distance_threshold = null,
   active = true, onTitle, onBusyChange,
 }) {
   const [messages, setMessages] = useState([]);
@@ -130,7 +130,7 @@ export default function ChatWindow({
 
     try {
       await streamChat({
-        raw_query: query, user_id, chat_history: history, k, rewrite_query, distance_threshold,
+        raw_query: query, user_id, chat_history: history, k, rewrite_query, distance_threshold, access_token,
         signal: controller.signal,
         onEvent: ({ event, data }) => {
           if (controller.signal.aborted) return;

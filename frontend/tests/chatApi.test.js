@@ -27,18 +27,19 @@ test("decodes fragmented UTF-8, split CRLF, multiline data, heartbeats and final
   assert.equal(events[1].data.text, "Hello 🌍 नमस्ते");
 });
 
-test("sends precisely the existing contract and stops at done even if the connection stays open", async (t) => {
+test("sends the Bearer token only in headers and stops at done even if the connection stays open", async (t) => {
   let cancelled = false;
   t.mock.method(globalThis, "fetch", async (url, options) => {
     assert.equal(url, "/api/v1/chat/sse");
     assert.deepEqual(JSON.parse(options.body), payload);
     assert.equal(options.method, "POST");
+    assert.equal(options.headers.Authorization, "Bearer test-access-token");
     return new Response(new ReadableStream({
       start(controller) { controller.enqueue(new TextEncoder().encode(encode("done", {}))); },
       cancel() { cancelled = true; },
     }), { headers: { "content-type": "text/event-stream" } });
   });
-  await streamChat({ ...payload, onEvent() {} });
+  await streamChat({ ...payload, access_token: "test-access-token", onEvent() {} });
   assert.equal(cancelled, true);
 });
 
@@ -113,6 +114,20 @@ test("checks HTTP failure before acquiring a reader and hides server exception d
   });
   assert.equal(readerOpened, false);
 });
+
+for (const status of [401, 403]) {
+  test(`handles HTTP ${status} before opening the SSE reader`, async (t) => {
+    const response = new Response(JSON.stringify({ detail: "Access denied" }), { status });
+    const getReader = t.mock.method(response.body, "getReader");
+    t.mock.method(globalThis, "fetch", async () => response);
+    const events = [];
+    await assert.rejects(streamChat({
+      ...payload, access_token: "test-access-token", onEvent: (event) => events.push(event),
+    }), new RegExp(`Chat request failed \\(${status}\\)`));
+    assert.equal(getReader.mock.callCount(), 0);
+    assert.deepEqual(events, []);
+  });
+}
 
 test("rejects malformed JSON and invalid token payload", async (t) => {
   mockStream(t, "event: token\ndata: nope\n\n");

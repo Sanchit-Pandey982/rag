@@ -2,11 +2,15 @@ const CHAT_SSE_URL = "/api/v1/chat/sse";
 
 // Existing public request interface; protocol decoding stays at the browser boundary.
 export async function streamChat({
-  raw_query, user_id, chat_history, k, rewrite_query, distance_threshold, onEvent, signal,
+  raw_query, user_id, chat_history, k, rewrite_query, distance_threshold, access_token, onEvent, signal,
 }) {
   const response = await fetch(CHAT_SSE_URL, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      ...(access_token ? { Authorization: `Bearer ${access_token}` } : {}),
+    },
     body: JSON.stringify({ raw_query, user_id, chat_history, k, rewrite_query, distance_threshold }),
     signal,
   });

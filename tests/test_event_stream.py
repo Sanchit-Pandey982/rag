@@ -3,13 +3,16 @@
 import asyncio
 import json
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import phase1
+from app.dependencies.auth import get_current_user
 from app.routes.chat import router
+from app.schemas.auth import UserResponse
 from app.services.rag_services import RAGService
 from phase1 import RAGSystem, RetrievedChunk
 
@@ -118,7 +121,15 @@ class EventStreamTests(unittest.TestCase):
         self.assertEqual(list(stream), [])
 
     def test_fastapi_forwards_normal_and_failure_events_as_sse(self):
+        async def fake_current_user():
+            return UserResponse(
+                user_id=self.arguments["user_id"],
+                username="test-user",
+                created_at=datetime.now(timezone.utc),
+            )
+
         app = FastAPI()
+        app.dependency_overrides[get_current_user] = fake_current_user
         app.include_router(router)
         app.state.rag_service = RAGService(self.rag)
         with TestClient(app) as client:

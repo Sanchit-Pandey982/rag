@@ -17,10 +17,12 @@ test("streams a grounded answer, renders sources and sends follow-up history", a
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.route("**/api/v1/chat/sse", (route) => {
+    expect(route.request().headers().authorization).toBe("Bearer browser-access-token");
     requests.push(route.request().postDataJSON());
     return route.fulfill({ contentType: "text/event-stream", body: response });
   });
   await page.goto("/");
+  await page.getByLabel("Access token", { exact: true }).fill("browser-access-token");
   await expect(page.getByText("API ready", { exact: true })).toBeVisible();
   await page.getByRole("textbox", { name: "Ask your knowledge a question" }).fill("Explain RAG");
   await page.getByRole("button", { name: "Send question" }).click();
