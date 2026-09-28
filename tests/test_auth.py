@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import os
 from secrets import token_urlsafe
 import unittest
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 from uuid import UUID
 
 from bson import BSON, ObjectId
@@ -52,7 +52,12 @@ class InMemoryUsers:
         # Let competing registrations reach insertion before checking uniqueness.
         await asyncio.sleep(0)
         for field in self.unique_indexes:
-            if any(saved[field] == document[field] for saved in self.documents):
+            # The lifespan test shares one double across collections, so an
+            # index from another collection may be absent here. MongoDB does
+            # not treat a missing field as equal to a present value.
+            if field not in document:
+                continue
+            if any(field in saved and saved[field] == document[field] for saved in self.documents):
                 raise DuplicateKeyError(
                     "duplicate key", 11000, {"keyPattern": {field: 1}}
                 )
@@ -243,6 +248,27 @@ class RegistrationRouteTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 422)
         self.users.insert_one.assert_not_awaited()
 
+    def test_registration_rejects_weak_or_absurd_passwords(self):
+        # NIST floor (8) and Argon2 work bound (256); neither inserts.
+        for password in ("short7!", "x" * 257):
+            with self.subTest(password=password[:8] + "..."):
+                response = self.client.post("/api/v1/auth/register", json={
+                    "username": "sanchit", "password": password,
+                })
+                self.assertEqual(response.status_code, 422)
+        self.users.insert_one.assert_not_awaited()
+
+    def test_login_never_reports_policy_only_bad_credentials(self):
+        # A 5-char guess fails closed with the uniform 401, not a 422 that
+        # would turn login into a password-policy oracle.
+        response = self.client.post("/api/v1/auth/login", json={
+            "username": "sanchit", "password": "wrong",
+        })
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json(), {"detail": "Invalid username or password."}
+        )
+
     def test_validation_errors_never_echo_submitted_credentials(self):
         for payload in (
             {"password": "private-password", "password_hash": "private-hash"},
@@ -313,8 +339,15 @@ class AuthLifespanTests(unittest.IsolatedAsyncioTestCase):
             )
             self.mongo.admin.command.assert_awaited_once_with("ping")
             self.mongo.__getitem__.assert_called_once_with("test_auth")
-            self.mongo.__getitem__.return_value.__getitem__.assert_called_once_with("users")
-            self.assertEqual(self.users.unique_indexes, {"username", "user_id"})
+            self.assertEqual(
+                self.mongo.__getitem__.return_value.__getitem__.call_args_list,
+                [call("users"), call("conversations"),
+                 call("messages"), call("documents")],
+            )
+            # The lifespan shares one double across collections, so other
+            # services' unique fields accumulate here; auth only needs its
+            # own identity indexes present.
+            self.assertLessEqual({"username", "user_id"}, self.users.unique_indexes)
             self.assertIs(self.app.state.auth_service.users, self.users)
             self.assertIsInstance(self.app.state.jwt_service, JWTService)
             self.assertEqual(self.app.state.jwt_service.issuer, "test-issuer")

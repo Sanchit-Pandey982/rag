@@ -38,6 +38,8 @@ class ChatAuthorizationTests(unittest.TestCase):
             "k": 4,
             "rewrite_query": False,
             "distance_threshold": 0.8,
+            # Phase 3.5 additive field; None keeps the legacy history behavior.
+            "conversation_id": None,
         }
         self.rag_service = Mock(spec=RAGService)
         self.rag_service.run_once.return_value = {

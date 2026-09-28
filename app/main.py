@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import asyncio
+import logging
 import os
 from pathlib import Path
 
@@ -12,11 +14,24 @@ from phase1 import RAGSystem, load_txt_documents
 
 from app.routes.auth import router as auth_router
 from app.routes.chat import router as chat_router
+from app.routes.conversations import router as conversations_router
+from app.routes.documents import router as documents_router
 from app.security.jwt import JWTService
 from app.security.cookies import RefreshCookieSettings
 from app.services.auth_service import AuthService
+from app.services.conversation_service import ConversationService
+from app.services.document_jobs import requeue_stale_uploads
+from app.services.document_service import (
+    DEFAULT_MAX_UPLOAD_BYTES,
+    DocumentLocks,
+    DocumentService,
+)
 from app.services.rag_services import RAGService
+from app.services.rate_limit_service import RateLimitService
 from app.services.refresh_token_service import RefreshTokenService
+
+
+logger = logging.getLogger(__name__)
 
 
 def directory_accepts_writes(path: Path) -> bool:
@@ -44,6 +59,27 @@ def get_chroma_path(project_root: Path) -> Path:
     fallback_path = project_root / "runtime_chroma_data"
     fallback_path.mkdir(parents=True, exist_ok=True)
     return fallback_path
+
+
+def get_upload_dir(project_root: Path) -> Path:
+    """User-owned upload root; relative UPLOAD_DIR resolves under the
+    project like the Chroma path so dev and server layouts agree."""
+    configured = Path(os.getenv("UPLOAD_DIR", "uploads")).expanduser()
+    if not configured.is_absolute():
+        configured = project_root / configured
+    configured.mkdir(parents=True, exist_ok=True)
+    return configured.resolve()
+
+
+def get_max_upload_bytes() -> int:
+    raw = os.getenv("MAX_UPLOAD_BYTES", str(DEFAULT_MAX_UPLOAD_BYTES)).strip()
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError("MAX_UPLOAD_BYTES must be a positive integer") from error
+    if value <= 0:
+        raise ValueError("MAX_UPLOAD_BYTES must be a positive integer")
+    return value
 
 
 @asynccontextmanager
@@ -76,6 +112,8 @@ async def lifespan(
         await redis_client.ping()
         app.state.redis_client = redis_client
         app.state.refresh_token_service = RefreshTokenService(redis_client)
+        # Phase 3.9: same client, separate `rate_limit:` namespace.
+        app.state.rate_limit_service = RateLimitService(redis_client)
 
         await mongo_client.admin.command("ping")
         database = mongo_client[os.getenv("MONGODB_DATABASE", "agent")]
@@ -83,8 +121,25 @@ async def lifespan(
         await auth_service.ensure_indexes()
         app.state.auth_service = auth_service
 
-        # Preserve existing RAG construction, ingestion, and readiness behavior.
+        # Phase 3.5: reuse the same long-lived client/database for chat history.
+        conversation_service = ConversationService(
+            database["conversations"], database["messages"]
+        )
+        await conversation_service.ensure_indexes()
+        app.state.conversation_service = conversation_service
+
+        # Phase 3.6: tenant-owned document metadata lives beside it.
+        document_service = DocumentService(database["documents"])
+        await document_service.ensure_indexes()
+        app.state.document_service = document_service
+        # Phase 3.8: in-process delete-vs-ingest mutexes (single process).
+        app.state.document_locks = DocumentLocks()
+
         project_root = Path(__file__).resolve().parents[1]
+        app.state.upload_dir = get_upload_dir(project_root)
+        app.state.max_upload_bytes = get_max_upload_bytes()
+
+        # Preserve existing RAG construction, ingestion, and readiness behavior.
         rag = RAGSystem(
             collection_name="learning_rag",
             chroma_path=str(get_chroma_path(project_root)),
@@ -97,6 +152,24 @@ async def lifespan(
 
         app.state.rag_service = RAGService(rag=rag)
         app.state.ready = rag.collection.count() > 0
+
+        # Phase 3.8 crash recovery: background jobs die with the process,
+        # so rows still stuck at `processing` are re-enqueued here. Re-ingest
+        # is idempotent per document (prior chunks are deleted first), which
+        # is what makes a blind replay safe. Recovery is best-effort by
+        # design: it must never fail startup -- the rows keep their honest
+        # status for the next restart either way.
+        try:
+            await requeue_stale_uploads(
+                service=document_service,
+                rag_service=app.state.rag_service,
+                upload_dir=app.state.upload_dir,
+                locks=app.state.document_locks,
+                max_upload_bytes=app.state.max_upload_bytes,
+            )
+        except Exception:
+            logger.exception("Could not requeue stale uploads")
+
         yield
     finally:
         app.state.ready = False
@@ -125,6 +198,8 @@ app.include_router(
     chat_router
 )
 app.include_router(auth_router)
+app.include_router(conversations_router)
+app.include_router(documents_router)
 
 
 @app.get("/health")

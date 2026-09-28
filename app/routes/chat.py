@@ -5,7 +5,9 @@ from fastapi.responses import StreamingResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
 from app.dependencies.chat import authorize_chat_request
+from app.dependencies.rate_limit import enforce_chat_rate_limit
 from app.schemas.chat import ChatRequest, ChatResponse
+from app.services import chat_orchestration as orchestration
 
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
@@ -15,10 +17,12 @@ router = APIRouter(prefix="/api/v1", tags=["chat"])
 def chat(
     authorized_payload: Annotated[ChatRequest, Depends(authorize_chat_request)],
     request: Request,
+    _: Annotated[None, Depends(enforce_chat_rate_limit)] = None,
 ) -> ChatResponse:
     rag_service = request.app.state.rag_service
+    service = orchestration.conversation_service_of(request)
 
-    result = rag_service.run_once(authorized_payload)
+    result = orchestration.run_chat_once(rag_service, service, authorized_payload)
     return ChatResponse(**result)
 
 
@@ -26,27 +30,38 @@ def chat(
 def chat_stream(
     authorized_payload: Annotated[ChatRequest, Depends(authorize_chat_request)],
     request: Request,
+    _: Annotated[None, Depends(enforce_chat_rate_limit)] = None,
 ) -> StreamingResponse:
     rag_service = request.app.state.rag_service
+    service = orchestration.conversation_service_of(request)
 
-    stream = rag_service.run_once_stream(authorized_payload)
-    return StreamingResponse(content=stream, media_type="text/plain")
+    rag_payload, turn_id = orchestration.prepare_chat(authorized_payload, service)
+    stream = rag_service.run_once_stream(rag_payload)
+    wrapped = orchestration.wrap_text_stream(stream, service, authorized_payload, turn_id)
+    return StreamingResponse(content=wrapped, media_type="text/plain")
 
 
 @router.post("/chat/sse", response_class=EventSourceResponse)
 def chat_sse(
     authorized_payload: Annotated[ChatRequest, Depends(authorize_chat_request)],
     request: Request,
+    _: Annotated[None, Depends(enforce_chat_rate_limit)] = None,
 ):
-
-    # Dependencies run before this generator starts and before HTTP 200 is sent.
     rag_service = request.app.state.rag_service
+    service = orchestration.conversation_service_of(request)
 
-    event_stream = rag_service.run_once_event_stream(authorized_payload)
+    # Runs before the 200/stream starts: unknown or foreign conversation_id
+    # is a 404 here, never a broken stream.
+    rag_payload, turn_id = orchestration.prepare_chat(authorized_payload, service)
 
-    for item in event_stream:
+    event_stream = rag_service.run_once_event_stream(rag_payload)
+    wrapped = orchestration.wrap_event_stream(
+        event_stream, service, authorized_payload, turn_id
+    )
 
-        yield ServerSentEvent(
-            event=item["event"],
-            data=item["data"],
+    return EventSourceResponse(
+        content=(
+            ServerSentEvent(event=item["event"], data=item["data"])
+            for item in wrapped
         )
+    )

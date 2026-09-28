@@ -1,4 +1,5 @@
 from collections.abc import Awaitable, Callable
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -6,6 +7,11 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 
 from app.dependencies.auth import get_current_user
+from app.dependencies.rate_limit import (
+    enforce_login_rate_limit,
+    enforce_refresh_rate_limit,
+    enforce_register_rate_limit,
+)
 from app.schemas.auth import AccessTokenResponse, LoginRequest, RegisterRequest, UserResponse
 from app.security.cookies import REFRESH_COOKIE_NAME, clear_refresh_cookie, set_refresh_cookie
 from app.security.jwt import JWTService, RefreshTokenError
@@ -86,7 +92,12 @@ def reject_refresh(request: Request) -> JSONResponse:
 
 
 @router.post("/login", response_model=AccessTokenResponse)
-async def login(payload: LoginRequest, request: Request, response: Response) -> AccessTokenResponse:
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    response: Response,
+    _: Annotated[None, Depends(enforce_login_rate_limit)] = None,
+) -> AccessTokenResponse:
     auth_service: AuthService = request.app.state.auth_service
     user = await auth_service.authenticate_user(
         username=payload.username,
@@ -105,7 +116,11 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
 
 
 @router.post("/refresh", response_model=AccessTokenResponse)
-async def refresh(request: Request, response: Response) -> AccessTokenResponse | Response:
+async def refresh(
+    request: Request,
+    response: Response,
+    _: Annotated[None, Depends(enforce_refresh_rate_limit)] = None,
+) -> AccessTokenResponse | Response:
     token = request.cookies.get(REFRESH_COOKIE_NAME)
     if not token:
         return reject_refresh(request)
@@ -143,7 +158,11 @@ async def me(current_user: UserResponse = Depends(get_current_user)) -> UserResp
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def register(payload: RegisterRequest, request: Request) -> UserResponse:
+async def register(
+    payload: RegisterRequest,
+    request: Request,
+    _: Annotated[None, Depends(enforce_register_rate_limit)] = None,
+) -> UserResponse:
     auth_service: AuthService = request.app.state.auth_service
 
     try:

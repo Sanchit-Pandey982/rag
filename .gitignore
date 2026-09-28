@@ -4,4 +4,5 @@ __pycache__/
 *.pyc
 chroma_data
 runtime_chroma_data
+uploads/
 AGENT_PROJECT_EXPLANATION.html

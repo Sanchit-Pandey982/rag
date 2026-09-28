@@ -12,6 +12,7 @@ class InMemoryRedis:
         self.set = AsyncMock(side_effect=self.store)
         self.getdel = AsyncMock(side_effect=self.consume)
         self.delete = AsyncMock(side_effect=self.remove)
+        self.eval = AsyncMock(side_effect=self.fixed_window)
         self.ping = AsyncMock(return_value=True)
         self.aclose = AsyncMock()
 
@@ -38,3 +39,18 @@ class InMemoryRedis:
         await asyncio.sleep(0)
         self.expire_key(key)
         return int(self.entries.pop(key, None) is not None)
+
+    async def fixed_window(self, script, numkeys, *args):
+        """Emulate the rate-limit Lua script: INCR, expire-on-first-write,
+        and PTTL, in one step. Refresh-session entries are untouched."""
+        await asyncio.sleep(0)
+        key, window_ms = args[0], args[1]
+        self.expire_key(key)
+        count = int(self.entries.get(key, (0, 0))[0]) + 1
+        if count == 1:
+            self.entries[key] = (count, self.now + window_ms / 1000)
+        else:
+            _, exat = self.entries[key]
+            self.entries[key] = (count, exat)
+        ttl_ms = int((self.entries[key][1] - self.now) * 1000)
+        return [count, max(ttl_ms, 0)]

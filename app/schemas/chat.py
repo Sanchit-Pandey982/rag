@@ -32,6 +32,12 @@ class ChatRequest(BaseModel):
     # Fix 7: cosine distance is non-negative and bounded to a meaningful range.
     distance_threshold: float | None = Field(default=None, ge=0, le=2)
 
+    # Phase 3.5 additive change: optional server-generated conversation id.
+    # None preserves the legacy browser-supplied chat_history behavior.
+    # When present, the server loads authoritative MongoDB history and
+    # ignores the client-supplied chat_history for RAG context.
+    conversation_id: str | None = Field(default=None, max_length=256)
+
 
 class RetrievedChunkResponse(BaseModel):
     chunk_id: str
