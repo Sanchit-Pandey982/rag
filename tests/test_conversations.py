@@ -10,7 +10,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -25,6 +25,7 @@ from app.services.conversation_service import (
     COMPLETED,
     FAILED,
     PENDING,
+    SUMMARY_KEEP_RECENT,
     ConversationService,
     RAG_HISTORY_LIMIT,
 )
@@ -384,20 +385,36 @@ class ConversationPhaseTests(unittest.TestCase):
         for index in range(RAG_HISTORY_LIMIT + 10):
             self.complete_turn(
                 conversation_id, "alice", f"q{index}", f"a{index}",
-                at=base + timedelta(seconds=index),
             )
-        client.post("/api/v1/chat", json={
-            "raw_query": "latest", "user_id": "alice", "chat_history": [],
-            "conversation_id": conversation_id,
-        })
+        # Distinct timestamps in insertion order: Windows clock granularity
+        # can stamp rapid inserts identically, and ties have no defined
+        # user-before-assistant order.
+        for seq, document in enumerate(self.messages.documents):
+            document["created_at"] = base + timedelta(milliseconds=seq)
+        # Phase 1: past the threshold RAG gets a summary plus the most
+        # recent messages, not raw truncated history. Patch the LLM seam
+        # so this stays hermetic (no network in tests).
+        with patch.object(
+            orchestration, "default_summarize_fn",
+            return_value="Long conversation summary.",
+        ):
+            client.post("/api/v1/chat", json={
+                "raw_query": "latest", "user_id": "alice", "chat_history": [],
+                "conversation_id": conversation_id,
+            })
         rag_payload = self.rag_service.run_once.call_args.args[0]
         history = [message.model_dump() for message in rag_payload.chat_history]
-        self.assertEqual(len(history), RAG_HISTORY_LIMIT)
-        # Oldest 10 turns dropped; most recent turn present and ordered.
-        self.assertEqual(history[0], {"role": "user", "content": "q10"})
-        self.assertEqual(history[-1], {"role": "assistant", "content": "a24"})
-        # Full history is still stored.
-        self.assertEqual(len(self.messages.documents), 2 * (RAG_HISTORY_LIMIT + 10))
+        self.assertEqual(len(history), SUMMARY_KEEP_RECENT + 1)
+        self.assertEqual(
+            history[0], {"role": "system", "content": "Long conversation summary."}
+        )
+        # 30 turns; last 8 messages are turns 26-29, oldest first.
+        self.assertEqual(history[1], {"role": "user", "content": "q26"})
+        self.assertEqual(history[-1], {"role": "assistant", "content": "a29"})
+        # Full history is still stored (30 seeded turns + the turn itself).
+        self.assertEqual(
+            len(self.messages.documents), 2 * (RAG_HISTORY_LIMIT + 10) + 2
+        )
 
 
 if __name__ == "__main__":

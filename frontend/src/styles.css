@@ -181,6 +181,7 @@ input[role=switch]:checked::after { transform: translateX(12px); }
 .elapsed { color: #b2aebb; font-size: 9px; margin-left: auto; }
 .message-error { color: #a56565; border: 1px solid #f0dede; border-radius: 6px; background: #fff9f9; padding: 10px 12px; font-size: 11px; margin-top: 12px; overflow-wrap: anywhere; }
 .stopped-note { color: #a19380; font-size: 10px; margin-top: 10px; }
+.degraded-note { color: #9a7b2d; border: 1px solid #f0e3bd; border-radius: 6px; background: #fffdf4; padding: 8px 12px; font-size: 10px; margin-top: 12px; }
 .thinking { display: flex; gap: 4px; height: 25px; align-items: center; }
 .thinking > span:not(.sr-only) { width: 5px; height: 5px; border-radius: 50%; background: #b0a6d5; animation: pulse 1s infinite; }
 .thinking > span:nth-child(2) { animation-delay: .15s; }

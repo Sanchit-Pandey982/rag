@@ -6,6 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.schemas.auth import UserResponse
 from app.security.jwt import AccessTokenError, JWTService
 from app.services.auth_service import AuthService
+from app.services.token_blacklist_service import BlacklistUnavailable
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -28,6 +29,25 @@ async def get_current_user(
         claims = jwt_service.decode_access_token(credentials.credentials)
     except AccessTokenError as error:
         raise unauthorized from error
+
+    # Phase 4: logged-out (or rotated) access tokens are revoked by JTI.
+    # The service is None-safe so unit tests without lifespan state keep
+    # working; a Redis outage is a 503 (retryable infra failure), never a
+    # silent acceptance of a possibly-revoked token.
+    blacklist_service = getattr(
+        request.app.state, "token_blacklist_service", None
+    )
+    if blacklist_service is not None:
+        try:
+            listed = await blacklist_service.is_blacklisted(claims["jti"])
+        except BlacklistUnavailable as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authentication session service is unavailable. "
+                       "Please retry.",
+            ) from error
+        if listed:
+            raise unauthorized
 
     auth_service: AuthService = request.app.state.auth_service
     user = await auth_service.get_user_by_id(claims["sub"])

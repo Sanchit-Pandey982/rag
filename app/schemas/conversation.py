@@ -18,6 +18,9 @@ class ConversationResponse(BaseModel):
     title: str | None = None
     created_at: datetime
     updated_at: datetime
+    summary: str | None = None
+    summary_message_count: int = 0
+    summary_updated_at: datetime | None = None
 
 
 class MessageResponse(BaseModel):

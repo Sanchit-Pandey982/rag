@@ -342,7 +342,8 @@ class AuthLifespanTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 self.mongo.__getitem__.return_value.__getitem__.call_args_list,
                 [call("users"), call("conversations"),
-                 call("messages"), call("documents")],
+                 call("messages"), call("documents"),
+                 call("usage_logs")],
             )
             # The lifespan shares one double across collections, so other
             # services' unique fields accumulate here; auth only needs its

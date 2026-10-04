@@ -6,7 +6,8 @@ prompts, or generates -- those remain RAG responsibilities in ``phase1.py``.
 Data model (two collections, so a long conversation can never outgrow a
 single MongoDB document):
 
-    conversations: conversation_id, user_id, title, created_at, updated_at
+    conversations: conversation_id, user_id, title, created_at, updated_at,
+                   summary, summary_message_count, summary_updated_at
     messages:      message_id, conversation_id, user_id, role, content,
                    turn_id, status, created_at
 
@@ -19,11 +20,14 @@ uuids, never browser-chosen.
 """
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from pymongo.errors import PyMongoError
+
+from app.utils.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,20 @@ logger = logging.getLogger(__name__)
 # RAG receives only the most recent completed messages (matches the
 # ChatRequest.chat_history cap of 20).
 RAG_HISTORY_LIMIT = 20
+
+# Summarization tuning, overridable via environment.
+# SUMMARY_THRESHOLD: summarize once completed messages exceed this count.
+# SUMMARY_KEEP_RECENT: recent verbatim messages kept alongside the summary.
+# SUMMARY_MAX_AGE: new messages since the last summary before re-summarizing.
+SUMMARY_KEEP_RECENT = 8
+
+
+def summary_threshold() -> int:
+    return int(os.getenv("SUMMARY_THRESHOLD", "20"))
+
+
+def summary_max_age() -> int:
+    return int(os.getenv("SUMMARY_MAX_AGE", "10"))
 
 COMPLETED = "completed"
 PENDING = "pending"
@@ -59,6 +77,7 @@ class ConversationService:
         self.conversations = conversations
         self.messages = messages
 
+    @retry_with_backoff(circuit="mongodb")
     async def ensure_indexes(self) -> None:
         # Uniqueness reinforces correctness: backend uuids must never collide.
         await self.conversations.create_index("conversation_id", unique=True)
@@ -71,6 +90,7 @@ class ConversationService:
             [("user_id", 1), ("conversation_id", 1), ("created_at", 1)]
         )
 
+    @retry_with_backoff(circuit="mongodb")
     async def create_conversation(
         self, user_id: str, title: str | None = None
     ) -> dict[str, Any]:
@@ -81,6 +101,9 @@ class ConversationService:
             "title": title,
             "created_at": now,
             "updated_at": now,
+            "summary": None,
+            "summary_message_count": 0,
+            "summary_updated_at": None,
         }
         try:
             await self.conversations.insert_one(document)
@@ -89,6 +112,7 @@ class ConversationService:
             raise ConversationStoreUnavailable("Conversation store unavailable") from error
         return document
 
+    @retry_with_backoff(circuit="mongodb")
     async def get_conversation(
         self, conversation_id: str, user_id: str
     ) -> dict[str, Any] | None:
@@ -102,6 +126,7 @@ class ConversationService:
             logger.exception("Could not read conversation")
             raise ConversationStoreUnavailable("Conversation store unavailable") from error
 
+    @retry_with_backoff(circuit="mongodb")
     async def list_conversations(
         self, user_id: str, limit: int = 50
     ) -> list[dict[str, Any]]:
@@ -115,6 +140,7 @@ class ConversationService:
             logger.exception("Could not list conversations")
             raise ConversationStoreUnavailable("Conversation store unavailable") from error
 
+    @retry_with_backoff(circuit="mongodb")
     async def load_chat_history(
         self,
         conversation_id: str,
@@ -145,6 +171,94 @@ class ConversationService:
             for document in documents
         ]
 
+    @retry_with_backoff(circuit="mongodb")
+    async def count_completed_messages(
+        self, conversation_id: str, user_id: str
+    ) -> int:
+        """Number of completed messages; capped so the count query stays cheap.
+
+        The cap is threshold + max age + recent window + 1: anything above it
+        means "definitely summarize", and the exact total no longer matters.
+        """
+        cap = summary_threshold() + summary_max_age() + SUMMARY_KEEP_RECENT + 1
+        try:
+            cursor = (
+                self.messages.find({
+                    "conversation_id": conversation_id,
+                    "user_id": user_id,
+                    "status": COMPLETED,
+                })
+                .sort("created_at", 1)
+            )
+            documents = await cursor.to_list(length=cap)
+        except PyMongoError as error:
+            logger.exception("Could not count conversation messages")
+            raise ConversationStoreUnavailable("Conversation store unavailable") from error
+        return len(documents)
+
+    @retry_with_backoff(circuit="mongodb")
+    async def load_oldest_completed(
+        self, conversation_id: str, user_id: str, limit: int
+    ) -> list[dict[str, str]]:
+        """Oldest completed messages first, for summarization input."""
+        try:
+            cursor = (
+                self.messages.find({
+                    "conversation_id": conversation_id,
+                    "user_id": user_id,
+                    "status": COMPLETED,
+                })
+                .sort("created_at", 1)
+            )
+            documents = await cursor.to_list(length=limit)
+        except PyMongoError as error:
+            logger.exception("Could not load oldest conversation messages")
+            raise ConversationStoreUnavailable("Conversation store unavailable") from error
+        return [
+            {"role": document["role"], "content": document["content"]}
+            for document in documents
+        ]
+
+    async def get_summary_state(
+        self, conversation_id: str, user_id: str
+    ) -> dict[str, Any]:
+        """Current summary plus how many messages it covers.
+
+        Deliberately undecorated: it delegates to the retried
+        ``get_conversation``, and a second retry layer here would
+        multiply attempts (up to 9) on a sustained outage.
+        """
+        conversation = await self.get_conversation(conversation_id, user_id)
+        if conversation is None:
+            raise ConversationNotFound(conversation_id)
+        return {
+            "summary": conversation.get("summary"),
+            "summary_message_count": conversation.get("summary_message_count", 0),
+        }
+
+    @retry_with_backoff(circuit="mongodb")
+    async def save_summary(
+        self,
+        conversation_id: str,
+        user_id: str,
+        summary: str,
+        message_count: int,
+    ) -> None:
+        """Store a fresh summary and the message count it covers."""
+        try:
+            await self.conversations.update_one(
+                {"conversation_id": conversation_id, "user_id": user_id},
+                {"$set": {
+                    "summary": summary,
+                    "summary_message_count": message_count,
+                    "summary_updated_at": _utcnow(),
+                }},
+            )
+        except PyMongoError as error:
+            logger.exception("Could not save conversation summary")
+            raise ConversationStoreUnavailable("Conversation store unavailable") from error
+
+    @retry_with_backoff(circuit="mongodb")
     async def list_messages(
         self,
         conversation_id: str,
@@ -165,6 +279,7 @@ class ConversationService:
             logger.exception("Could not list conversation messages")
             raise ConversationStoreUnavailable("Conversation store unavailable") from error
 
+    @retry_with_backoff(circuit="mongodb")
     async def start_turn(
         self, conversation_id: str, user_id: str, content: str
     ) -> str:
@@ -195,6 +310,7 @@ class ConversationService:
             raise ConversationStoreUnavailable("Conversation store unavailable") from error
         return turn_id
 
+    @retry_with_backoff(circuit="mongodb")
     async def complete_turn(
         self,
         conversation_id: str,
@@ -227,6 +343,7 @@ class ConversationService:
             logger.exception("Could not save completed turn")
             raise ConversationStoreUnavailable("Conversation store unavailable") from error
 
+    @retry_with_backoff(circuit="mongodb")
     async def fail_turn(
         self,
         conversation_id: str,

@@ -21,8 +21,12 @@ def chat(
 ) -> ChatResponse:
     rag_service = request.app.state.rag_service
     service = orchestration.conversation_service_of(request)
+    usage_service = orchestration.usage_service_of(request)
 
-    result = orchestration.run_chat_once(rag_service, service, authorized_payload)
+    result = orchestration.run_chat_once(
+        rag_service, service, authorized_payload,
+        usage_service=usage_service,
+    )
     return ChatResponse(**result)
 
 
@@ -34,10 +38,17 @@ def chat_stream(
 ) -> StreamingResponse:
     rag_service = request.app.state.rag_service
     service = orchestration.conversation_service_of(request)
+    usage_service = orchestration.usage_service_of(request)
 
     rag_payload, turn_id = orchestration.prepare_chat(authorized_payload, service)
-    stream = rag_service.run_once_stream(rag_payload)
-    wrapped = orchestration.wrap_text_stream(stream, service, authorized_payload, turn_id)
+    # Caller-owned usage collector: the pipeline fills it while the
+    # response streams, and the wrapper below records it on completion.
+    usage: dict = {}
+    stream = rag_service.run_once_stream(rag_payload, usage=usage)
+    wrapped = orchestration.wrap_text_stream(
+        stream, service, authorized_payload, turn_id,
+        usage_service=usage_service, usage=usage,
+    )
     return StreamingResponse(content=wrapped, media_type="text/plain")
 
 
@@ -49,6 +60,7 @@ def chat_sse(
 ):
     rag_service = request.app.state.rag_service
     service = orchestration.conversation_service_of(request)
+    usage_service = orchestration.usage_service_of(request)
 
     # Runs before the 200/stream starts: unknown or foreign conversation_id
     # is a 404 here, never a broken stream.
@@ -56,7 +68,8 @@ def chat_sse(
 
     event_stream = rag_service.run_once_event_stream(rag_payload)
     wrapped = orchestration.wrap_event_stream(
-        event_stream, service, authorized_payload, turn_id
+        event_stream, service, authorized_payload, turn_id,
+        usage_service=usage_service,
     )
 
     return EventSourceResponse(

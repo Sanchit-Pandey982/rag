@@ -50,6 +50,7 @@ function Message({ message, onRetry, isStreaming }) {
         </details>)}</div>
       </section>}
       {message.sources?.length === 0 && <p className="helper">No source citations were returned for this answer.</p>}
+      {message.degraded && <p className="degraded-note" role="status">The AI service is experiencing high load — showing document excerpts instead of a generated answer.</p>}
       {message.error && <div className="message-error" role="alert">{message.error}</div>}
       {message.status === "cancelled" && <p className="stopped-note">Stopped. Any partial answer above is incomplete.</p>}
       <div className="message-actions">
@@ -173,7 +174,11 @@ export default function ChatWindow({
         break;
       case "done":
         setStreamStatus("done");
-        updateMessage(assistantMessageId, { status: "done", elapsed: performance.now() - startedAt });
+        updateMessage(assistantMessageId, {
+          status: "done",
+          elapsed: performance.now() - startedAt,
+          degraded: data?.metadata?.degraded === true,
+        });
         break;
       case "error":
         setStreamStatus("error");

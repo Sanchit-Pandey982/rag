@@ -180,3 +180,15 @@ test("history obeys message length limits and includes valid supplied context", 
   assert.deepEqual(history[0], { role: "system", content: "context" });
   assert.equal([...history.at(-1).content].length, 8000);
 });
+test("passes done-event metadata (cache/degraded flags) through untouched", async (t) => {
+  const text = encode("start", { raw_query: "How?" }) +
+    encode("retrieval", { retrieval_query: "How?", retrieved_document_ids: ["d"] }) +
+    encode("token", { text: "Excerpt" }) +
+    encode("sources", { sources: [] }) +
+    encode("done", { metadata: { cache: "miss", degraded: true } });
+  mockStream(t, text);
+  const events = [];
+  await streamChat({ ...payload, onEvent: (event) => events.push(event) });
+  assert.deepEqual(events.map(({ event }) => event), ["start", "retrieval", "token", "sources", "done"]);
+  assert.deepEqual(events.at(-1).data, { metadata: { cache: "miss", degraded: true } });
+});

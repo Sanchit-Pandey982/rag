@@ -46,8 +46,8 @@ class ChatAuthorizationTests(unittest.TestCase):
             "answer": "An answer", "retrieval_query": "What is RAG?",
             "retrieved_document_ids": [], "chunks": [],
         }
-        self.rag_service.run_once_stream.side_effect = lambda payload: iter(["An answer"])
-        self.rag_service.run_once_event_stream.side_effect = lambda payload: iter([
+        self.rag_service.run_once_stream.side_effect = lambda payload, **kwargs: iter(["An answer"])
+        self.rag_service.run_once_event_stream.side_effect = lambda payload, **kwargs: iter([
             {"event": "start", "data": {"raw_query": payload.raw_query}},
             {"event": "done", "data": {}},
         ])

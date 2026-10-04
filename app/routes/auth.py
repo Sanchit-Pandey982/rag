@@ -5,8 +5,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
+from fastapi.security import HTTPAuthorizationCredentials
 
-from app.dependencies.auth import get_current_user
+from app.dependencies.auth import bearer_scheme, get_current_user
 from app.dependencies.rate_limit import (
     enforce_login_rate_limit,
     enforce_refresh_rate_limit,
@@ -14,9 +15,10 @@ from app.dependencies.rate_limit import (
 )
 from app.schemas.auth import AccessTokenResponse, LoginRequest, RegisterRequest, UserResponse
 from app.security.cookies import REFRESH_COOKIE_NAME, clear_refresh_cookie, set_refresh_cookie
-from app.security.jwt import JWTService, RefreshTokenError
+from app.security.jwt import AccessTokenError, JWTService, RefreshTokenError
 from app.services.auth_service import AuthService, UsernameAlreadyExistsError
 from app.services.refresh_token_service import RefreshSessionUnavailable, RefreshTokenService
+from app.services.token_blacklist_service import BlacklistUnavailable
 
 
 class AuthRoute(APIRoute):
@@ -39,6 +41,12 @@ class AuthRoute(APIRoute):
             except RefreshSessionUnavailable:
                 # Keep the cookie so logout can be retried; never claim revocation
                 # succeeded when Redis did not confirm it.
+                response = JSONResponse(
+                    status_code=503,
+                    content={"detail": "Authentication session service is unavailable. Please retry."},
+                )
+            except BlacklistUnavailable:
+                # Same no-false-success rule for access-token blacklisting.
                 response = JSONResponse(
                     status_code=503,
                     content={"detail": "Authentication session service is unavailable. Please retry."},
@@ -82,6 +90,32 @@ async def revoke_cookie_session(request: Request) -> None:
     await request.app.state.refresh_token_service.revoke_refresh_token(claims["jti"])
 
 
+async def blacklist_present_access_token(request: Request, credentials) -> None:
+    """Revoke the caller's access token when one was presented.
+
+    Phase 4: logout/refresh accept an *optional* Bearer token. Absent or
+    undecodable tokens are ignored (both endpoints keep working without
+    one); a valid one has its JTI blacklisted until its natural expiry
+    so it cannot be reused after logout or rotation. Redis failures
+    propagate as BlacklistUnavailable (mapped to 503 by AuthRoute) so a
+    revocation is never falsely reported as done.
+    """
+    if credentials is None:
+        return
+    try:
+        claims = request.app.state.jwt_service.decode_access_token(
+            credentials.credentials
+        )
+    except AccessTokenError:
+        return
+    blacklist_service = getattr(
+        request.app.state, "token_blacklist_service", None
+    )
+    if blacklist_service is None:
+        return
+    await blacklist_service.blacklist_jti(claims["jti"], expires_at=claims["exp"])
+
+
 def reject_refresh(request: Request) -> JSONResponse:
     response = JSONResponse(
         status_code=401,
@@ -119,6 +153,7 @@ async def login(
 async def refresh(
     request: Request,
     response: Response,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)] = None,
     _: Annotated[None, Depends(enforce_refresh_rate_limit)] = None,
 ) -> AccessTokenResponse | Response:
     token = request.cookies.get(REFRESH_COOKIE_NAME)
@@ -141,11 +176,23 @@ async def refresh(
     if user is None or user.disabled:
         return reject_refresh(request)
 
+    # Phase 4: rotation retires the presented access token alongside the
+    # consumed refresh token. Blacklisting runs before issuing so a 503
+    # never mints replacement tokens for a non-revoked predecessor.
+    await blacklist_present_access_token(request, credentials)
+
     return await issue_session(request, response, user.user_id)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(request: Request) -> Response:
+async def logout(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)] = None,
+) -> Response:
+    # Phase 4: when the client presents its access token, revoke it by
+    # JTI; the refresh cookie is revoked as before. Either step failing
+    # with 503 leaves an honest retryable state (nothing claims success).
+    await blacklist_present_access_token(request, credentials)
     await revoke_cookie_session(request)
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
     clear_refresh_cookie(response, settings=request.app.state.refresh_cookie_settings)

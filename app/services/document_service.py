@@ -22,6 +22,8 @@ from uuid import uuid4
 
 from pymongo.errors import PyMongoError
 
+from app.utils.retry import retry_with_backoff
+
 logger = logging.getLogger(__name__)
 
 # v1 supports exactly what ``phase1.load_txt_documents`` already handles.
@@ -185,10 +187,12 @@ class DocumentService:
     def __init__(self, documents):
         self.documents = documents
 
+    @retry_with_backoff(circuit="mongodb")
     async def ensure_indexes(self) -> None:
         await self.documents.create_index("document_id", unique=True)
         await self.documents.create_index([("user_id", 1), ("created_at", -1)])
 
+    @retry_with_backoff(circuit="mongodb")
     async def create_processing_document(
         self,
         *,
@@ -219,6 +223,7 @@ class DocumentService:
             raise DocumentStoreUnavailable("Document store unavailable") from error
         return document
 
+    @retry_with_backoff(circuit="mongodb")
     async def mark_ready(
         self, document_id: str, user_id: str, chunk_count: int
     ) -> None:
@@ -235,6 +240,7 @@ class DocumentService:
             logger.exception("Could not mark document ready")
             raise DocumentStoreUnavailable("Document store unavailable") from error
 
+    @retry_with_backoff(circuit="mongodb")
     async def mark_failed(self, document_id: str, user_id: str) -> None:
         try:
             await self.documents.update_one(
@@ -245,6 +251,7 @@ class DocumentService:
             logger.exception("Could not mark document failed")
             raise DocumentStoreUnavailable("Document store unavailable") from error
 
+    @retry_with_backoff(circuit="mongodb")
     async def get_document(
         self, document_id: str, user_id: str
     ) -> dict[str, Any] | None:
@@ -258,6 +265,7 @@ class DocumentService:
             logger.exception("Could not read document")
             raise DocumentStoreUnavailable("Document store unavailable") from error
 
+    @retry_with_backoff(circuit="mongodb")
     async def list_documents(
         self, user_id: str, limit: int = 50
     ) -> list[dict[str, Any]]:
@@ -273,6 +281,7 @@ class DocumentService:
             logger.exception("Could not list documents")
             raise DocumentStoreUnavailable("Document store unavailable") from error
 
+    @retry_with_backoff(circuit="mongodb")
     async def delete_document(
         self, document_id: str, user_id: str
     ) -> bool:
@@ -287,6 +296,7 @@ class DocumentService:
             raise DocumentStoreUnavailable("Document store unavailable") from error
         return result.deleted_count > 0
 
+    @retry_with_backoff(circuit="mongodb")
     async def list_stale_processing(
         self, limit: int = 100
     ) -> list[dict[str, Any]]:

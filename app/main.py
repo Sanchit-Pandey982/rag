@@ -16,10 +16,13 @@ from app.routes.auth import router as auth_router
 from app.routes.chat import router as chat_router
 from app.routes.conversations import router as conversations_router
 from app.routes.documents import router as documents_router
+from app.routes.usage import router as usage_router
 from app.security.jwt import JWTService
 from app.security.cookies import RefreshCookieSettings
 from app.services.auth_service import AuthService
+from app.services.cache_service import CacheService
 from app.services.conversation_service import ConversationService
+from app.services.degradation_service import DegradationTracker
 from app.services.document_jobs import requeue_stale_uploads
 from app.services.document_service import (
     DEFAULT_MAX_UPLOAD_BYTES,
@@ -29,6 +32,8 @@ from app.services.document_service import (
 from app.services.rag_services import RAGService
 from app.services.rate_limit_service import RateLimitService
 from app.services.refresh_token_service import RefreshTokenService
+from app.services.token_blacklist_service import TokenBlacklistService
+from app.services.usage_service import UsageService
 
 
 logger = logging.getLogger(__name__)
@@ -112,8 +117,18 @@ async def lifespan(
         await redis_client.ping()
         app.state.redis_client = redis_client
         app.state.refresh_token_service = RefreshTokenService(redis_client)
+        # Phase 4: revoked access-token JTIs, same client, separate namespace.
+        app.state.token_blacklist_service = TokenBlacklistService(redis_client)
         # Phase 3.9: same client, separate `rate_limit:` namespace.
         app.state.rate_limit_service = RateLimitService(redis_client)
+        # Phase 5: same client, `response_cache:` entries + per-user
+        # generation counters. Fail-open: Redis trouble means uncached
+        # answers, never failed chat turns.
+        app.state.cache_service = CacheService(redis_client)
+        # Phase 7: same client, one global `llm:degraded:responses`
+        # total. Fail-open: an unwritable counter never blocks the
+        # fallback answer it was meant to observe.
+        app.state.degradation_tracker = DegradationTracker(redis_client)
 
         await mongo_client.admin.command("ping")
         database = mongo_client[os.getenv("MONGODB_DATABASE", "agent")]
@@ -135,6 +150,11 @@ async def lifespan(
         # Phase 3.8: in-process delete-vs-ingest mutexes (single process).
         app.state.document_locks = DocumentLocks()
 
+        # Phase 8: per-request token ledger beside the other stores.
+        usage_service = UsageService(database["usage_logs"])
+        await usage_service.ensure_indexes()
+        app.state.usage_service = usage_service
+
         project_root = Path(__file__).resolve().parents[1]
         app.state.upload_dir = get_upload_dir(project_root)
         app.state.max_upload_bytes = get_max_upload_bytes()
@@ -150,7 +170,10 @@ async def lifespan(
             documents = load_txt_documents(project_root / "data")
             rag.ingest_documents(documents, user_id="eval_user")
 
-        app.state.rag_service = RAGService(rag=rag)
+        app.state.rag_service = RAGService(
+            rag=rag, response_cache=app.state.cache_service,
+            degradation_tracker=app.state.degradation_tracker,
+        )
         app.state.ready = rag.collection.count() > 0
 
         # Phase 3.8 crash recovery: background jobs die with the process,
@@ -200,6 +223,7 @@ app.include_router(
 app.include_router(auth_router)
 app.include_router(conversations_router)
 app.include_router(documents_router)
+app.include_router(usage_router)
 
 
 @app.get("/health")

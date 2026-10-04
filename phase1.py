@@ -16,6 +16,12 @@ from google.genai import types
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langsmith import traceable
 
+from app.utils.retry import (
+    CircuitBreakerOpen,
+    is_transient_error,
+    retry_with_backoff,
+)
+
 
 # ============================================================
 # Configuration
@@ -92,6 +98,7 @@ class EvalCase:
 # ============================================================
 
 @traceable(run_type="embedding", name="embed_documents")
+@retry_with_backoff(circuit="gemini")
 def embed_documents(texts: list[str]) -> list[list[float]]:
 
     if not texts:
@@ -112,6 +119,7 @@ def embed_documents(texts: list[str]) -> list[list[float]]:
 
 
 @traceable(run_type="embedding", name="embed_query")
+@retry_with_backoff(circuit="gemini")
 def embed_query(text: str) -> list[float]:
 
     result = get_gemini_client().models.embed_content(
@@ -175,6 +183,7 @@ def load_txt_documents(folder: str) -> list[Document]:
 # ============================================================
 
 @traceable(run_type="llm", name="condense_question")
+@retry_with_backoff(circuit="gemini")
 def condense_question(
     chat_history: list[dict],
     latest_query: str
@@ -218,6 +227,158 @@ Standalone question:
         return latest_query
 
     return response.text.strip()
+
+
+# ============================================================
+# Conversation summarization
+# ============================================================
+
+@traceable(run_type="llm", name="summarize_conversation")
+@retry_with_backoff(circuit="gemini")
+def summarize_conversation_history(
+    messages: list[dict],
+    previous_summary: str | None = None,
+) -> str:
+    """Condense older chat messages into a short factual summary.
+
+    ``messages`` are the oldest-first ``{"role", "content"}`` dicts to fold
+    in; ``previous_summary`` is the existing summary to extend, if any.
+    Returns "" when there is nothing to summarize or the LLM call fails, so
+    callers can fall back to plain truncated history.
+    """
+
+    if not messages and not previous_summary:
+        return ""
+
+    transcript = "\n".join(
+        f"{message['role']}: {message['content'][:2000]}"
+        for message in messages[-60:]
+    )
+
+    if previous_summary:
+        prompt = f"""
+Update the conversation summary below so it also covers the new messages.
+Keep it short (under 200 words), factual, and in third person.
+Do NOT answer any question. Do NOT invent details.
+
+Existing summary:
+{previous_summary[:2000]}
+
+New messages:
+{transcript}
+
+Updated summary:
+"""
+    else:
+        prompt = f"""
+Summarize this conversation in under 200 words: the user's goals,
+key facts established, and any decisions or answers given.
+Write in third person. Do NOT answer any question.
+Do NOT invent details.
+
+Conversation:
+{transcript}
+
+Summary:
+"""
+
+    try:
+        response = get_gemini_client().models.generate_content(
+            model=GENERATION_MODEL,
+            contents=prompt,
+        )
+    except Exception:
+        logger.exception("Could not summarize conversation history")
+        return ""
+
+    return response.text.strip() if response.text else ""
+
+
+# ============================================================
+# Degraded responses (Phase 7)
+# ============================================================
+
+DEGRADED_PREFIX = (
+    "I'm experiencing high load. Here's what I found in your documents:"
+)
+
+
+def degraded_mode_enabled() -> bool:
+    return os.getenv("DEGRADED_MODE_ENABLED", "false").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def degraded_max_chunks() -> int:
+    try:
+        value = int(os.getenv("DEGRADED_MAX_CHUNKS", "3"))
+    except ValueError:
+        return 3
+    return value if value > 0 else 3
+
+
+def is_llm_unavailable(error: BaseException) -> bool:
+    """Whether this failure means the LLM (not the request) is down.
+
+    Transient errors after Phase 6 retries are exhausted, plus an open
+    Gemini circuit (fail-fast without attempting). Anything else --
+    4xx, programming bugs, cancellations -- stays on the error path.
+    """
+    return is_transient_error(error) or isinstance(
+        error, CircuitBreakerOpen)
+
+
+def build_degraded_answer(
+    chunks: list[RetrievedChunk],
+    max_chunks: int | None = None,
+) -> str:
+    """Honest excerpts: the top retrieved chunks as plain text.
+
+    No generation, no claims beyond what retrieval returned -- the
+    prefix says exactly what happened.
+    """
+    limit = max_chunks if max_chunks is not None else degraded_max_chunks()
+    lines = [DEGRADED_PREFIX]
+    for number, chunk in enumerate(list(chunks)[:max(limit, 0)], start=1):
+        lines.append("")
+        lines.append(f"[Source {number}]")
+        lines.append(f"Document: {chunk.metadata['document_id']}")
+        lines.append(f"File: {chunk.metadata['source']}")
+        lines.append("")
+        lines.append(chunk.text)
+    return "\n".join(lines)
+
+
+# ============================================================
+# Token usage (Phase 8)
+# ============================================================
+
+def usage_from_metadata(metadata) -> dict | None:
+    """Token counts from a Gemini usage-metadata object, else None.
+
+    Completion tokens are ``candidates_token_count``. Counts must be
+    real non-negative ints: Mock attributes (never ints) can never
+    fabricate ledger rows, and partial metadata is rejected outright.
+    """
+    if metadata is None:
+        return None
+    prompt = getattr(metadata, "prompt_token_count", None)
+    completion = getattr(metadata, "candidates_token_count", None)
+    total = getattr(metadata, "total_token_count", None)
+    for value in (prompt, completion, total):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+        "model": GENERATION_MODEL,
+    }
+
+
+def extract_usage_metadata(response) -> dict | None:
+    """Token counts from a Gemini response, or None when absent."""
+    return usage_from_metadata(getattr(response, "usage_metadata", None))
 
 
 # ============================================================
@@ -434,11 +595,13 @@ Chunk: {chunk.metadata["chunk_index"]}
     # --------------------------------------------------------
 
     @traceable(run_type="llm", name="generate_answer")
+    @retry_with_backoff(circuit="gemini")
     def generate_answer(
         self,
         question: str,
         chunks: list[RetrievedChunk],
-        chat_history: list[dict]
+        chat_history: list[dict],
+        usage: dict | None = None,
     ) -> str:
 
         # Don't even waste an LLM request if retrieval
@@ -488,6 +651,14 @@ Answer:
             contents=prompt
         )
 
+        # Phase 8: caller-owned collector (per-request, so concurrent
+        # turns cannot clobber each other). Absent/invalid metadata
+        # leaves it untouched -- refusals never reach an LLM call.
+        if usage is not None:
+            report = extract_usage_metadata(response)
+            if report is not None:
+                usage.update(report)
+
         return (
             response.text.strip()
             if response.text
@@ -499,11 +670,13 @@ Answer:
     name="generate_answer_stream",
     reduce_fn=lambda chunks: "".join(chunks)
     )
+    @retry_with_backoff(circuit="gemini")
     def generate_answer_stream(
         self,
         question: str,
         chunks: list[RetrievedChunk],
-        chat_history: list[dict]
+        chat_history: list[dict],
+        usage: dict | None = None,
     ):
 
         if not chunks:
@@ -552,14 +725,285 @@ Answer:
             contents=prompt
         )
 
+        # Phase 8: usage metadata rides on the final stream chunk, so
+        # the last seen report wins. Fills the caller-owned collector
+        # only when the stream completes (mid-stream failures keep the
+        # error path with nothing recorded).
+        last_metadata = None
         for chunk in stream:
 
+            metadata = getattr(chunk, "usage_metadata", None)
+            if metadata is not None:
+                last_metadata = metadata
             if chunk.text:
                 yield chunk.text
+
+        if usage is not None and last_metadata is not None:
+            report = usage_from_metadata(last_metadata)
+            if report is not None:
+                usage.update(report)
 
     # --------------------------------------------------------
     # COMPLETE PIPELINE
     # --------------------------------------------------------
+
+    # --------------------------------------------------------
+    # HYBRID RETRIEVAL (Phase 2)
+    # --------------------------------------------------------
+    def _retrieve_chunks(
+        self,
+        query: str,
+        user_id: str,
+        k: int = 3,
+        distance_threshold: float | None = None,
+        use_hybrid: bool | None = None,
+        hybrid_retriever=None,
+        use_rerank: bool | None = None,
+        reranker=None,
+    ):
+        """Vector retrieval, RRF-fused hybrid, then cross-encoder rerank.
+
+        ``use_hybrid=None`` follows the ``HYBRID_ENABLED`` env flag so
+        existing callers keep vector-only behavior by default.
+        ``hybrid_retriever`` is an injection seam for tests; when omitted
+        a short-lived ``HybridRetriever`` wraps this instance (its
+        per-user BM25 cache is best-effort here -- the long-lived cache
+        lives on ``RAGService``). Any unexpected wrapper failure falls
+        back to plain vector retrieval; vector-leg errors propagate.
+
+        ``use_rerank=None`` follows ``RERANKER_ENABLED`` (default off).
+        When reranking, candidates are over-fetched (up to 10, the
+        Chroma single-query cap) and rescored to the top-k; any rerank
+        failure keeps the retrieval order. ``reranker`` is the injection
+        seam (long-lived instance lives on ``RAGService``).
+        """
+        try:
+            from app.services.reranker import reranker_enabled
+            do_rerank = (
+                reranker_enabled() if use_rerank is None else bool(use_rerank)
+            )
+        except Exception:
+            do_rerank = bool(use_rerank) if use_rerank is not None else False
+        # Rerank the full candidate window (up to 10), then cut to k.
+        fetch_k = min(10, max(k, 10)) if do_rerank else k
+        if use_hybrid is False:
+            candidates = self.retrieve(
+                query=query,
+                user_id=user_id,
+                k=fetch_k,
+                distance_threshold=distance_threshold,
+            )
+        else:
+            try:
+                from app.services.retrieval import HybridRetriever
+            except Exception:
+                candidates = self.retrieve(
+                    query=query,
+                    user_id=user_id,
+                    k=fetch_k,
+                    distance_threshold=distance_threshold,
+                )
+            else:
+                retriever = hybrid_retriever
+                if retriever is None:
+                    if getattr(self, "_hybrid_retriever", None) is None:
+                        try:
+                            self._hybrid_retriever = HybridRetriever(self)
+                        except Exception:
+                            candidates = self.retrieve(
+                                query=query,
+                                user_id=user_id,
+                                k=fetch_k,
+                                distance_threshold=distance_threshold,
+                            )
+                            retriever = None
+                        else:
+                            retriever = self._hybrid_retriever
+                    else:
+                        retriever = self._hybrid_retriever
+                if retriever is None:
+                    pass  # candidates already set by the fallback above
+                else:
+                    try:
+                        candidates = retriever.hybrid_retrieve(
+                            query=query,
+                            user_id=user_id,
+                            k=fetch_k,
+                            distance_threshold=distance_threshold,
+                            use_hybrid=use_hybrid,
+                        )
+                    except ValueError:
+                        raise
+                    except Exception:
+                        logger.exception(
+                            "Hybrid retrieval failed; using vector results")
+                        candidates = self.retrieve(
+                            query=query,
+                            user_id=user_id,
+                            k=fetch_k,
+                            distance_threshold=distance_threshold,
+                        )
+        if not do_rerank:
+            return candidates
+        try:
+            from app.services.reranker import CrossEncoderReranker
+        except Exception:
+            return candidates[:k]
+        reranker_obj = reranker
+        if reranker_obj is None:
+            if getattr(self, "_reranker", None) is None:
+                try:
+                    self._reranker = CrossEncoderReranker()
+                except Exception:
+                    return candidates[:k]
+            reranker_obj = self._reranker
+        try:
+            return reranker_obj.rerank_fused(
+                query, candidates, k, use_rerank=True,
+            )
+        except Exception:
+            logger.exception("Reranking failed; keeping retrieval order")
+            return candidates[:k]
+
+    # --------------------------------------------------------
+    # RESPONSE CACHE (Phase 5)
+    # --------------------------------------------------------
+    @staticmethod
+    def _resolve_response_cache(response_cache, use_cache):
+        """Return the cache to consult, or None when disabled/absent.
+
+        ``use_cache=None`` follows the ``CACHE_ENABLED`` env flag so
+        existing callers keep uncached behavior by default; ``True`` /
+        ``False`` forces or disables per request (tests, overrides).
+        """
+        if response_cache is None:
+            return None
+        try:
+            from app.services.cache_service import cache_enabled
+            enabled = (
+                cache_enabled() if use_cache is None else bool(use_cache)
+            )
+        except Exception:
+            logger.exception("Response cache flag unreadable; caching off")
+            return None
+        return response_cache if enabled else None
+
+    @staticmethod
+    def _lookup_cached(cache, user_id, raw_query, chunks):
+        """Stored payload for this retrieval, or None. Never raises.
+
+        Malformed payloads (missing keys) are treated as a miss so a
+        poisoned entry can never alter the event or result contract.
+        """
+        try:
+            payload = cache.get(
+                user_id, raw_query, [chunk.chunk_id for chunk in chunks],
+            )
+        except Exception:
+            logger.exception(
+                "Response cache lookup failed; continuing uncached")
+            return None
+        if not isinstance(payload, dict):
+            return None
+        required = (
+            "answer", "retrieval_query", "retrieved_document_ids",
+            "chunks", "sources",
+        )
+        if any(key not in payload for key in required):
+            return None
+        if not payload["answer"]:
+            return None
+        return payload
+
+    def _store_cached(
+        self, cache, user_id, raw_query, chunks,
+        retrieval_query, answer,
+    ):
+        """Persist a successful grounded answer. Never raises.
+
+        Refusals and empty answers are never stored: an unanswerable
+        query must be re-evaluated against the current corpus, and an
+        error must never become a cached "answer".
+        """
+        if cache is None:
+            return
+        if not answer or answer == REFUSAL_MESSAGE:
+            return
+        try:
+            cache.store(
+                user_id, raw_query,
+                [chunk.chunk_id for chunk in chunks],
+                {
+                    "answer": answer,
+                    "retrieval_query": retrieval_query,
+                    "retrieved_document_ids": [
+                        chunk.metadata["document_id"]
+                        for chunk in chunks
+                    ],
+                    "chunks": [asdict(chunk) for chunk in chunks],
+                    "sources": [
+                        {
+                            "chunk_id": chunk.chunk_id,
+                            "document_id": chunk.metadata["document_id"],
+                            "source": chunk.metadata["source"],
+                            "title": chunk.metadata["title"],
+                            "chunk_index": chunk.metadata["chunk_index"],
+                            "distance": chunk.distance,
+                        }
+                        for chunk in chunks
+                    ],
+                },
+            )
+        except Exception:
+            logger.exception("Response cache store failed")
+
+    # --------------------------------------------------------
+    # DEGRADED RESPONSES (Phase 7)
+    # --------------------------------------------------------
+    @staticmethod
+    def _resolve_degraded(degraded_tracker, use_degraded):
+        """Whether to serve excerpts on LLM failure, plus the counter.
+
+        ``use_degraded=None`` follows the ``DEGRADED_MODE_ENABLED`` env
+        flag so existing callers keep error-path behavior by default.
+        Counting is best-effort: a missing tracker still serves the
+        fallback, just uncounted.
+        """
+        try:
+            enabled = (
+                degraded_mode_enabled()
+                if use_degraded is None else bool(use_degraded)
+            )
+        except Exception:
+            logger.exception("Degraded-mode flag unreadable; degraded off")
+            return False, None
+        return enabled, degraded_tracker if enabled else None
+
+    def _degraded_answer(self, error, chunks, degraded):
+        """Excerpt fallback text, or None when this must stay an error.
+
+        Only LLM-unavailability qualifies (transient error after
+        retries, or an open circuit). Bugs and 4xx still take the error
+        path, and empty retrieval keeps the refusal -- there is nothing
+        to excerpt. Served fallbacks are counted in Redis (fail-open).
+        ``degraded`` is the ``(enabled, tracker)`` pair above.
+        """
+        enabled, tracker = degraded
+        if not enabled or not chunks:
+            return None
+        if not is_llm_unavailable(error):
+            return None
+        try:
+            text = build_degraded_answer(chunks)
+        except Exception:
+            logger.exception("Could not build degraded answer")
+            return None
+        if tracker is not None:
+            try:
+                tracker.increment()
+            except Exception:
+                logger.exception("Degraded-response counter failed")
+        return text
 
     def run_once(
         self,
@@ -568,7 +1012,15 @@ Answer:
         chat_history: list[dict] | None = None,
         k: int = 3,
         rewrite_query: bool = False,
-        distance_threshold: float | None = None
+        distance_threshold: float | None = None,
+        use_hybrid: bool | None = None,
+        hybrid_retriever=None,
+        use_rerank: bool | None = None,
+        reranker=None,
+        use_cache: bool | None = None,
+        response_cache=None,
+        use_degraded: bool | None = None,
+        degraded_tracker=None,
     ) -> dict:
 
         if chat_history is None:
@@ -582,33 +1034,94 @@ Answer:
         else:
             retrieval_query = raw_query
 
-        chunks = self.retrieve(
+        chunks = self._retrieve_chunks(
             query=retrieval_query,
             user_id=user_id,
             k=k,
-            distance_threshold=distance_threshold
+            distance_threshold=distance_threshold,
+            use_hybrid=use_hybrid,
+            hybrid_retriever=hybrid_retriever,
+            use_rerank=use_rerank,
+            reranker=reranker,
         )
 
-        answer = self.generate_answer(
-            question=raw_query,
-            chunks=chunks,
-            chat_history=chat_history
+        # Phase 5: the cache key needs the retrieved chunk ids, so the
+        # lookup happens here -- after retrieval, before the LLM call.
+        cache = self._resolve_response_cache(response_cache, use_cache)
+        cached = (
+            self._lookup_cached(cache, user_id, raw_query, chunks)
+            if cache is not None
+            else None
         )
+        if cached is not None:
+            return {
+                "answer": cached["answer"],
+                "retrieval_query": cached["retrieval_query"],
 
-        return {
+                "retrieved_document_ids": cached["retrieved_document_ids"],
+
+                "chunks": cached["chunks"],
+
+                "cache_hit": True,
+            }
+
+        answer = None
+        degraded = False
+        usage_report: dict = {}
+        try:
+            answer = self.generate_answer(
+                question=raw_query,
+                chunks=chunks,
+                chat_history=chat_history,
+                usage=usage_report,
+            )
+        except Exception as error:
+            # Phase 7: after Phase 6 retries are exhausted, an
+            # unavailable LLM serves excerpts instead of an error.
+            # Anything ineligible re-raises into the normal path.
+            degraded_text = self._degraded_answer(
+                error, chunks,
+                self._resolve_degraded(degraded_tracker, use_degraded),
+            )
+            if degraded_text is None:
+                raise
+            answer = degraded_text
+            degraded = True
+
+        retrieved_document_ids = [
+            chunk.metadata["document_id"]
+            for chunk in chunks
+        ]
+
+        if not degraded:
+            # Errors propagate before any store; refusals are skipped
+            # inside. Degraded answers are never cached: the LLM may
+            # have recovered by the next identical query.
+            self._store_cached(
+                cache, user_id, raw_query, chunks, retrieval_query, answer,
+            )
+
+        result = {
             "answer": answer,
             "retrieval_query": retrieval_query,
 
-            "retrieved_document_ids": [
-                chunk.metadata["document_id"]
-                for chunk in chunks
-            ],
+            "retrieved_document_ids": retrieved_document_ids,
 
             "chunks": [
                 asdict(chunk)
                 for chunk in chunks
             ]
         }
+        if cache is not None:
+            result["cache_hit"] = False
+        if degraded:
+            # Only present on the degraded path, like cache_hit.
+            result["degraded"] = True
+        if usage_report:
+            # Only present when the LLM actually reported token counts,
+            # so uncached/unmetered callers keep the historical shape.
+            result["usage"] = dict(usage_report)
+        return result
     def run_once_stream(
         self,
         raw_query: str,
@@ -616,7 +1129,16 @@ Answer:
         chat_history: list[dict] | None = None,
         k: int = 3,
         rewrite_query: bool = True,
-        distance_threshold: float | None = None
+        distance_threshold: float | None = None,
+        use_hybrid: bool | None = None,
+        hybrid_retriever=None,
+        use_rerank: bool | None = None,
+        reranker=None,
+        use_cache: bool | None = None,
+        response_cache=None,
+        use_degraded: bool | None = None,
+        degraded_tracker=None,
+        usage: dict | None = None,
     ):
 
         if chat_history is None:
@@ -633,17 +1155,62 @@ Answer:
 
             retrieval_query = raw_query
 
-        chunks = self.retrieve(
+        chunks = self._retrieve_chunks(
             query=retrieval_query,
             user_id=user_id,
             k=k,
-            distance_threshold=distance_threshold
+            distance_threshold=distance_threshold,
+            use_hybrid=use_hybrid,
+            hybrid_retriever=hybrid_retriever,
+            use_rerank=use_rerank,
+            reranker=reranker,
         )
 
-        yield from self.generate_answer_stream(
-            question=raw_query,
-            chunks=chunks,
-            chat_history=chat_history
+        # Phase 5: same lookup point as run_once -- a hit replays the
+        # stored answer as stream tokens without touching the LLM.
+        cache = self._resolve_response_cache(response_cache, use_cache)
+        cached = (
+            self._lookup_cached(cache, user_id, raw_query, chunks)
+            if cache is not None
+            else None
+        )
+        if cached is not None:
+            yield cached["answer"]
+            return
+
+        # Phase 7: pull the first token eagerly. A failure before it
+        # (retries already exhausted inside the generator) can still
+        # become excerpts; once tokens flow, errors propagate -- the
+        # client already has a partial answer that must not be
+        # replaced.
+        degraded = self._resolve_degraded(degraded_tracker, use_degraded)
+        try:
+            stream = self.generate_answer_stream(
+                question=raw_query,
+                chunks=chunks,
+                chat_history=chat_history,
+                usage=usage,
+            )
+            iterator = iter(stream)
+            first = next(iterator)
+        except StopIteration:
+            return
+        except Exception as error:
+            degraded_text = self._degraded_answer(error, chunks, degraded)
+            if degraded_text is None:
+                raise
+            yield degraded_text
+            return
+
+        parts = [first]
+        yield first
+        for text in iterator:
+            parts.append(text)
+            yield text
+
+        self._store_cached(
+            cache, user_id, raw_query, chunks,
+            retrieval_query, "".join(parts),
         )
     def run_once_event_stream(
         self,
@@ -652,7 +1219,15 @@ Answer:
         chat_history: list[dict] | None = None,
         k: int = 3,
         rewrite_query: bool = True,
-        distance_threshold: float | None = None
+        distance_threshold: float | None = None,
+        use_hybrid: bool | None = None,
+        hybrid_retriever=None,
+        use_rerank: bool | None = None,
+        reranker=None,
+        use_cache: bool | None = None,
+        response_cache=None,
+        use_degraded: bool | None = None,
+        degraded_tracker=None,
     ):
         """Yield semantic events, ending with either done or a generic error."""
 
@@ -694,11 +1269,15 @@ Answer:
 
             stage = "retrieval"
 
-            chunks = self.retrieve(
+            chunks = self._retrieve_chunks(
                 query=retrieval_query,
                 user_id=user_id,
                 k=k,
-                distance_threshold=distance_threshold
+                distance_threshold=distance_threshold,
+                use_hybrid=use_hybrid,
+                hybrid_retriever=hybrid_retriever,
+                use_rerank=use_rerank,
+                reranker=reranker,
             )
 
             retrieved_document_ids = [
@@ -715,23 +1294,93 @@ Answer:
             }
 
             # --------------------------------------------
+            # 3b. Response cache (Phase 5)
+            # --------------------------------------------
+
+            # The key needs the retrieved chunk ids, so the lookup sits
+            # after retrieval and before generation. A hit replays the
+            # stored answer through the same token/sources/done shape,
+            # flagging itself in the done metadata.
+            cache = self._resolve_response_cache(
+                response_cache, use_cache)
+            cached = (
+                self._lookup_cached(cache, user_id, raw_query, chunks)
+                if cache is not None
+                else None
+            )
+            if cached is not None:
+                yield {
+                    "event": "token",
+                    "data": {
+                        "text": cached["answer"]
+                    }
+                }
+                yield {
+                    "event": "sources",
+                    "data": {
+                        "sources": cached["sources"]
+                    }
+                }
+                yield {
+                    "event": "done",
+                    "data": {
+                        "metadata": {
+                            "cache": "hit"
+                        }
+                    }
+                }
+                return
+
+            # --------------------------------------------
             # 4. Generation streaming
             # --------------------------------------------
 
             stage = "generation"
 
-            for text in self.generate_answer_stream(
-                question=raw_query,
-                chunks=chunks,
-                chat_history=chat_history
-            ):
-
+            # Phase 7: same first-token rule as run_once_stream -- a
+            # pre-stream failure may become excerpts (counted in Redis);
+            # a mid-stream failure keeps the existing error event.
+            degraded = self._resolve_degraded(
+                degraded_tracker, use_degraded)
+            is_degraded = False
+            parts = []
+            usage_report: dict = {}
+            try:
+                stream = self.generate_answer_stream(
+                    question=raw_query,
+                    chunks=chunks,
+                    chat_history=chat_history,
+                    usage=usage_report,
+                )
+                iterator = iter(stream)
+                first = next(iterator)
+            except StopIteration:
+                first = None
+            except Exception as error:
+                degraded_text = self._degraded_answer(
+                    error, chunks, degraded)
+                if degraded_text is None:
+                    raise
+                first = degraded_text
+                is_degraded = True
+            if first is not None:
+                parts.append(first)
                 yield {
                     "event": "token",
                     "data": {
-                        "text": text
+                        "text": first
                     }
                 }
+            if not is_degraded:
+                for text in iterator:
+                    parts.append(text)
+
+                    yield {
+                        "event": "token",
+                        "data": {
+                            "text": text
+                        }
+                    }
 
             # --------------------------------------------
             # 5. Sources
@@ -758,15 +1407,38 @@ Answer:
                 }
             }
 
+            # Cache only completed, successful, non-degraded answers:
+            # refusals and empty outputs are re-evaluated next time, a
+            # degraded answer must not outlive the outage that caused it,
+            # and any failure below lands on the error event with
+            # nothing stored.
+            if not is_degraded:
+                self._store_cached(
+                    cache, user_id, raw_query, chunks,
+                    retrieval_query, "".join(parts),
+                )
+
             # --------------------------------------------
             # 6. Successful completion
             # --------------------------------------------
 
             stage = "done"
 
+            metadata: dict = {}
+            if cache is not None:
+                metadata["cache"] = "miss"
+            if is_degraded:
+                metadata["degraded"] = True
+            if usage_report and not is_degraded:
+                # Metered completions report their token counts; degraded
+                # answers never reach an LLM call, so there is nothing
+                # truthful to attach on that path.
+                metadata["usage"] = dict(usage_report)
             yield {
                 "event": "done",
-                "data": {}
+                # Uncached, non-degraded callers keep the exact
+                # historical shape (``{}``).
+                "data": {"metadata": metadata} if metadata else {}
             }
 
         except Exception:

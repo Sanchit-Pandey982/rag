@@ -10,6 +10,7 @@ from app.security.passwords import (
     hash_password,
     verify_password,
 )
+from app.utils.retry import retry_with_backoff
 
 
 class UsernameAlreadyExistsError(Exception):
@@ -20,10 +21,12 @@ class AuthService:
     def __init__(self, users: AsyncCollection[dict[str, Any]]):
         self.users = users
 
+    @retry_with_backoff(circuit="mongodb")
     async def ensure_indexes(self) -> None:
         await self.users.create_index("username", unique=True)
         await self.users.create_index("user_id", unique=True)
 
+    @retry_with_backoff(circuit="mongodb")
     async def register_user(self, username: str, password: str) -> User:
         username = normalize_username(username)
         password_hash = await run_in_threadpool(hash_password, password)
@@ -48,12 +51,14 @@ class AuthService:
 
         return user
 
+    @retry_with_backoff(circuit="mongodb")
     async def get_user_by_id(self, user_id: str) -> User | None:
         document = await self.users.find_one({"user_id": user_id})
         if document is None:
             return None
         return User.model_validate(document)
 
+    @retry_with_backoff(circuit="mongodb")
     async def authenticate_user(self, username: str, password: str) -> User | None:
         document = await self.users.find_one({"username": normalize_username(username)})
 
