@@ -13,6 +13,24 @@ from app.services import chat_orchestration as orchestration
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
 
+def prepare_sse_chat(
+    authorized_payload: Annotated[ChatRequest, Depends(authorize_chat_request)],
+    request: Request,
+    _: Annotated[None, Depends(enforce_chat_rate_limit)] = None,
+) -> tuple[ChatRequest, ChatRequest, str | None]:
+    """Resolve conversation history before SSE headers are sent.
+
+    FastAPI 0.141 invokes SSE endpoints in the event loop. Keeping this
+    synchronous work in a sync dependency makes FastAPI run it in the
+    threadpool, so the existing ``asyncio.run`` bridge is safe and an
+    unknown conversation still returns a 404 instead of a broken stream.
+    """
+
+    service = orchestration.conversation_service_of(request)
+    rag_payload, turn_id = orchestration.prepare_chat(authorized_payload, service)
+    return authorized_payload, rag_payload, turn_id
+
+
 @router.post("/chat", response_model=ChatResponse)
 def chat(
     authorized_payload: Annotated[ChatRequest, Depends(authorize_chat_request)],
@@ -54,17 +72,16 @@ def chat_stream(
 
 @router.post("/chat/sse", response_class=EventSourceResponse)
 def chat_sse(
-    authorized_payload: Annotated[ChatRequest, Depends(authorize_chat_request)],
+    prepared: Annotated[
+        tuple[ChatRequest, ChatRequest, str | None],
+        Depends(prepare_sse_chat),
+    ],
     request: Request,
-    _: Annotated[None, Depends(enforce_chat_rate_limit)] = None,
 ):
+    authorized_payload, rag_payload, turn_id = prepared
     rag_service = request.app.state.rag_service
     service = orchestration.conversation_service_of(request)
     usage_service = orchestration.usage_service_of(request)
-
-    # Runs before the 200/stream starts: unknown or foreign conversation_id
-    # is a 404 here, never a broken stream.
-    rag_payload, turn_id = orchestration.prepare_chat(authorized_payload, service)
 
     event_stream = rag_service.run_once_event_stream(rag_payload)
     wrapped = orchestration.wrap_event_stream(
@@ -72,9 +89,7 @@ def chat_sse(
         usage_service=usage_service,
     )
 
-    return EventSourceResponse(
-        content=(
-            ServerSentEvent(event=item["event"], data=item["data"])
-            for item in wrapped
-        )
-    )
+    # FastAPI 0.141's EventSourceResponse is a marker response class: yield
+    # ServerSentEvent items instead of returning an EventSourceResponse.
+    for item in wrapped:
+        yield ServerSentEvent(event=item["event"], data=item["data"])
