@@ -5,6 +5,7 @@ import json
 import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from urllib.parse import urlparse
 
 import chromadb
 
@@ -104,18 +105,34 @@ def embed_documents(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
 
+    # gemini-embedding-2 is multimodal: a plain list of strings is normalized
+    # into one multi-part Content and returns a single embedding. Wrap every
+    # chunk in its own Content so the response keeps one embedding per chunk.
+    contents = [
+        types.Content(parts=[types.Part.from_text(text=text)])
+        for text in texts
+    ]
+
     result = get_gemini_client().models.embed_content(
         model=EMBEDDING_MODEL,
-        contents=texts,
+        contents=contents,
         config=types.EmbedContentConfig(
             task_type="RETRIEVAL_DOCUMENT"
         )
     )
 
-    return [
+    embeddings = [
         embedding.values
         for embedding in result.embeddings
     ]
+
+    if len(embeddings) != len(texts):
+        raise ValueError(
+            f"Gemini returned {len(embeddings)} embeddings for "
+            f"{len(texts)} document chunks"
+        )
+
+    return embeddings
 
 
 @traceable(run_type="embedding", name="embed_query")
@@ -385,6 +402,32 @@ def extract_usage_metadata(response) -> dict | None:
 # RAG system
 # ============================================================
 
+def build_chroma_client(chroma_path: str):
+    """Return a Chroma HTTP client when CHROMA_URL is set (container
+    deployments), else the embedded persistent client.
+
+    Fix 6: normalize the persistent-store path at construction time.
+    Fix 6: relative storage paths are anchored to the project module,
+    so Uvicorn and CLI invocations select the same database.
+    """
+
+    chroma_url = os.getenv("CHROMA_URL", "").strip()
+    if chroma_url:
+        parsed = urlparse(chroma_url)
+        return chromadb.HttpClient(
+            host=parsed.hostname or "localhost",
+            port=parsed.port or 8000,
+            ssl=parsed.scheme == "https"
+        )
+
+    chroma_path_value = Path(chroma_path).expanduser()
+    if not chroma_path_value.is_absolute():
+        chroma_path_value = PROJECT_ROOT / chroma_path_value
+    return chromadb.PersistentClient(
+        path=str(chroma_path_value.resolve())
+    )
+
+
 class RAGSystem:
 
     def __init__(
@@ -394,16 +437,7 @@ class RAGSystem:
         reset: bool = False
     ):
 
-        # Fix 6: normalize the persistent-store path at construction time.
-        # Fix 6: relative storage paths are anchored to the project module,
-        # so Uvicorn and CLI invocations select the same database.
-        chroma_path_value = Path(chroma_path).expanduser()
-        if not chroma_path_value.is_absolute():
-            chroma_path_value = PROJECT_ROOT / chroma_path_value
-        chroma_path = str(chroma_path_value.resolve())
-        self.client = chromadb.PersistentClient(
-            path=chroma_path
-        )
+        self.client = build_chroma_client(chroma_path)
 
         if reset:
             try:
