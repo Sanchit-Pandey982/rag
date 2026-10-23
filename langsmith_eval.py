@@ -1,9 +1,27 @@
-from pathlib import Path
+"""RAG quality evaluation.
 
-from langsmith import Client
+Two modes:
+
+- default (LangSmith): upload the eval cases to a named dataset and run a
+  hosted experiment. Requires ``LANGSMITH_API_KEY``.
+- ``--local``: run the same cases against this process's RAG pipeline and
+  fail when retrieval/answer/refusal metrics drop below env thresholds.
+  This is the CI nightly gate; it needs only a Gemini key (and a reachable
+  Chroma instance via ``CHROMA_URL`` when run inside Compose).
+
+The RAG system and LangSmith client are constructed lazily so importing
+this module requires no credentials or network.
+"""
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
 
 from phase1 import (
     RAGSystem,
+    evaluate_cases,
     load_eval_cases
 )
 
@@ -11,12 +29,27 @@ from phase1 import (
 DATASET_NAME = "rag-phase1-evaluation"
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-rag = RAGSystem(
-    collection_name="learning_rag",
-    chroma_path=str(PROJECT_ROOT / "chroma_data")
-)
+DEFAULT_MIN_RETRIEVAL_RECALL = 0.80
+DEFAULT_MIN_ANSWER_ACCURACY = 0.80
+DEFAULT_MIN_REFUSAL_ACCURACY = 0.80
 
-client = Client()
+_rag = None
+
+
+def get_rag() -> RAGSystem:
+    global _rag
+    if _rag is None:
+        _rag = RAGSystem(
+            collection_name="learning_rag",
+            chroma_path=str(PROJECT_ROOT / "chroma_data")
+        )
+    return _rag
+
+
+def get_client():
+    # Lazy import: --local and importing the module must not need LangSmith.
+    from langsmith import Client
+    return Client()
 
 
 # ============================================================
@@ -25,7 +58,7 @@ client = Client()
 
 def target(inputs: dict) -> dict:
 
-    result = rag.run_once(
+    result = get_rag().run_once(
         raw_query=inputs["question"],
         user_id=inputs["user_id"],
         chat_history=inputs.get("history", []),
@@ -127,6 +160,7 @@ def refusal_evaluator(
 
 def create_dataset():
 
+    client = get_client()
     cases = load_eval_cases(
         PROJECT_ROOT / "eval_cases.json"
     )
@@ -183,6 +217,7 @@ def create_dataset():
 
 def run_experiment():
 
+    client = get_client()
     results = client.evaluate(
         target,
 
@@ -201,7 +236,78 @@ def run_experiment():
     )
 
     print(results)
+    return results
+
+
+# ============================================================
+# Local CI gate
+# ============================================================
+
+def _threshold(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def run_local_gate(k: int = 3, rewrite_query: bool = False) -> int:
+    """Run eval cases locally and return a process exit code."""
+    cases = load_eval_cases(PROJECT_ROOT / "eval_cases.json")
+    metrics = evaluate_cases(
+        get_rag(), cases, k=k, rewrite_query=rewrite_query
+    )
+
+    gates = {
+        "retrieval_recall": _threshold(
+            "EVAL_MIN_RETRIEVAL_RECALL", DEFAULT_MIN_RETRIEVAL_RECALL
+        ),
+        "answer_accuracy": _threshold(
+            "EVAL_MIN_ANSWER_ACCURACY", DEFAULT_MIN_ANSWER_ACCURACY
+        ),
+        "refusal_accuracy": _threshold(
+            "EVAL_MIN_REFUSAL_ACCURACY", DEFAULT_MIN_REFUSAL_ACCURACY
+        ),
+    }
+
+    summary = {key: round(metrics[key], 4) for key in gates}
+    summary["thresholds"] = gates
+    summary["cases"] = len(cases)
+    print(json.dumps(summary, indent=2))
+
+    failed = [
+        name for name, minimum in gates.items()
+        if metrics[name] < minimum
+    ]
+    if failed:
+        print(
+            "Eval gate failed: " + ", ".join(
+                f"{name}={metrics[name]:.4f} < {gates[name]:.4f}"
+                for name in failed
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="run the local threshold gate instead of a LangSmith experiment",
+    )
+    parser.add_argument("--k", type=int, default=3)
+    parser.add_argument("--rewrite-query", action="store_true")
+    args = parser.parse_args(argv)
+
+    if args.local:
+        return run_local_gate(k=args.k, rewrite_query=args.rewrite_query)
+
+    run_experiment()
+    return 0
 
 
 if __name__ == "__main__":
-    run_experiment()
+    raise SystemExit(main())
+

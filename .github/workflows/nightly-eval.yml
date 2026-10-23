@@ -1,0 +1,88 @@
+name: Nightly RAG eval
+
+# Secret-required: skips (does not fail) when the eval Gemini key is absent.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    name: Corpus eval gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check eval secret
+        id: secret
+        env:
+          EVAL_GEMINI_API_KEY: ${{ secrets.EVAL_GEMINI_API_KEY }}
+        run: |
+          if [ -z "$EVAL_GEMINI_API_KEY" ]; then
+            echo "EVAL_GEMINI_API_KEY is not configured; skipping nightly eval."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write ephemeral .env
+        if: steps.secret.outputs.run == 'true'
+        env:
+          EVAL_GEMINI_API_KEY: ${{ secrets.EVAL_GEMINI_API_KEY }}
+        run: |
+          umask 077
+          cat > .env <<EOF
+          GEMINI_API_KEY=$EVAL_GEMINI_API_KEY
+          JWT_SECRET_KEY=$(openssl rand -hex 32)
+          JWT_ISSUER=rag-learning-eval
+          JWT_AUDIENCE=rag-learning-eval
+          REFRESH_COOKIE_SECURE=false
+          LANGSMITH_TRACING=false
+          LANGCHAIN_TRACING_V2=false
+          EOF
+
+      - name: Start ephemeral stack
+        if: steps.secret.outputs.run == 'true'
+        run: docker compose up -d --build
+
+      - name: Wait for ready
+        if: steps.secret.outputs.run == 'true'
+        run: |
+          code=""
+          for _ in $(seq 1 120); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/ready || true)
+            if [ "$code" = "200" ]; then break; fi
+            sleep 2
+          done
+          if [ "$code" != "200" ]; then
+            echo "Backend did not become ready (last status: $code)"
+            docker compose logs --tail=200 backend
+            exit 1
+          fi
+
+      - name: Run eval gate inside the backend container
+        if: steps.secret.outputs.run == 'true'
+        env:
+          EVAL_MIN_RETRIEVAL_RECALL: "0.80"
+          EVAL_MIN_ANSWER_ACCURACY: "0.80"
+          EVAL_MIN_REFUSAL_ACCURACY: "0.80"
+        run: |
+          docker compose cp langsmith_eval.py backend:/app/langsmith_eval.py
+          docker compose cp eval_cases.json backend:/app/eval_cases.json
+          docker compose exec -T \
+            -e EVAL_MIN_RETRIEVAL_RECALL \
+            -e EVAL_MIN_ANSWER_ACCURACY \
+            -e EVAL_MIN_REFUSAL_ACCURACY \
+            backend python langsmith_eval.py --local
+
+      - name: Dump backend logs on failure
+        if: failure() && steps.secret.outputs.run == 'true'
+        run: docker compose logs --tail=300 backend
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
