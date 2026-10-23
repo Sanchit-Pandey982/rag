@@ -1,0 +1,17 @@
+services:
+  backend:
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      REFRESH_COOKIE_SECURE: "true"
+    # !override drops the dev bind mounts inherited from docker-compose.yml.
+    # The production image must run its own copied code, not the host tree.
+    volumes: !override
+      - uploads-data:/app/uploads
+
+  frontend:
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./certs:/etc/nginx/certs:ro
+      - ./frontend/nginx.prod.conf:/etc/nginx/conf.d/default.conf:ro

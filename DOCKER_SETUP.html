@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG Learning System — Docker Setup Guide (Phase 10)</title>
+<style>
+  :root {
+    --bg: #ffffff; --ink: #1a1a1a; --muted: #5b5b5b;
+    --line: #d8d8d8; --accent: #0b5fff; --accent-bg: #eaf1ff;
+    --ok: #0a7a3d; --ok-bg: #e6f5ec; --todo: #935705; --todo-bg: #fdf3e3;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    color: var(--ink); background: var(--bg); margin: 0; line-height: 1.55; }
+  header { background: #0d1117; color: #fff; padding: 2.2rem 1.5rem; }
+  header h1 { margin: 0 0 .4rem; font-size: 1.7rem; }
+  header p { margin: .2rem 0; color: #c9d1d9; max-width: 60rem; }
+  .note { display: inline-block; background: #1f6feb; border-radius: 4px;
+    font-size: .75rem; padding: .15rem .5rem; margin-top: .6rem; }
+  main { max-width: 62rem; margin: 0 auto; padding: 1.5rem 1.2rem 4rem; }
+  nav.toc { background: #f6f8fa; border: 1px solid var(--line);
+    border-radius: 8px; padding: 1rem 1.4rem; margin: 1.5rem 0 2rem; }
+  nav.toc ol { margin: .4rem 0; padding-left: 1.3rem; columns: 2; }
+  nav.toc li { margin: .15rem 0; font-size: .92rem; }
+  nav.toc a { color: var(--accent); text-decoration: none; }
+  h2 { border-bottom: 2px solid var(--ink); padding-bottom: .3rem;
+    margin-top: 2.6rem; font-size: 1.35rem; }
+  h3 { margin-top: 1.6rem; font-size: 1.05rem; }
+  p, li { font-size: .95rem; }
+  code { font-family: var(--mono); font-size: .85em; background: #f1f3f5;
+    padding: .1em .35em; border-radius: 4px; }
+  pre { background: #0d1117; color: #e6edf3; padding: 1rem 1.2rem;
+    border-radius: 8px; overflow-x: auto; font-size: .85rem; }
+  pre .c { color: #8b949e; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0;
+    font-size: .9rem; }
+  th, td { border: 1px solid var(--line); padding: .5rem .7rem;
+    text-align: left; vertical-align: top; }
+  th { background: #f6f8fa; }
+  .badge { display: inline-block; font-size: .72rem; font-weight: 700;
+    border-radius: 20px; padding: .1rem .6rem; white-space: nowrap; }
+  .done { background: var(--ok-bg); color: var(--ok); }
+  .left { background: var(--todo-bg); color: var(--todo); }
+  .flag { background: var(--accent-bg); color: var(--accent); }
+  figure { margin: 1.4rem 0; border: 1px solid var(--line);
+    border-radius: 8px; padding: 1rem; background: #fbfcfd; }
+  figcaption { font-size: .85rem; color: var(--muted); margin-top: .6rem; }
+  svg { width: 100%; height: auto; display: block; }
+  .warn { background: var(--todo-bg); border-left: 4px solid var(--todo);
+    padding: .7rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; }
+  .okbox { background: var(--ok-bg); border-left: 4px solid var(--ok);
+    padding: .7rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; }
+  footer { border-top: 1px solid var(--line); padding: 1.2rem;
+    color: var(--muted); font-size: .82rem; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>RAG Learning System — Docker Setup Guide</h1>
+  <p>This document shows how to install the external dependencies. It shows how to put the system in containers. It explains Phase 10 — Docker Compose.</p>
+  <p>Writing style: ASD-STE100 Simplified Technical English. Short sentences. Simple words. One idea per sentence.</p>
+  <span class="note">STATUS: PHASE 10 DONE &nbsp;•&nbsp; FRONTEND :80 &nbsp;•&nbsp; BACKEND :8000</span>
+</header>
+
+<main>
+<nav class="toc" aria-label="Contents">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#s1">1. What this document is</a></li>
+    <li><a href="#s2">2. Words you must know</a></li>
+    <li><a href="#s3">3. The dependencies of the system</a></li>
+    <li><a href="#s4">4. Set up Redis and MongoDB now</a></li>
+    <li><a href="#s5">5. What Docker is</a></li>
+    <li><a href="#s6">6. The backend image</a></li>
+    <li><a href="#s7">7. The frontend image</a></li>
+    <li><a href="#s8">8. ChromaDB: two modes</a></li>
+    <li><a href="#s9">9. Phase 10 — Docker Compose</a></li>
+    <li><a href="#s10">10. Run and check</a></li>
+    <li><a href="#s11">11. Problems and fixes</a></li>
+    <li><a href="#s12">12. Safety rules</a></li>
+  </ol>
+</nav>
+
+<h2 id="s1">1. What this document is</h2>
+<p>The system uses external dependencies. The dependencies are Redis, MongoDB, ChromaDB, and the Gemini API. Today you install them on the host machine. This document has two jobs:</p>
+<ul>
+  <li>Job 1: Show how to set up Redis and MongoDB on the host machine. Do this before any container work.</li>
+  <li>Job 2: Show how to put the full system in containers with Docker. This is Phase 10 — Docker Compose.</li>
+</ul>
+<p>After Phase 10, one command starts all services: <code>docker compose up -d --build</code>.</p>
+
+<h2 id="s2">2. Words you must know</h2>
+<table>
+<tr><th>Word</th><th>Meaning</th></tr>
+<tr><td><b>Image</b></td><td>A read-only package. It holds the code and the libraries.</td></tr>
+<tr><td><b>Container</b></td><td>A running copy of an image. It is isolated from the host.</td></tr>
+<tr><td><b>Volume</b></td><td>Storage that lives longer than a container. Data stays after a restart.</td></tr>
+<tr><td><b>Compose</b></td><td>A tool. It starts many containers from one YAML file.</td></tr>
+<tr><td><b>Health check</b></td><td>A small test. Docker repeats it. It shows if a container is ready.</td></tr>
+<tr><td><b>Port</b></td><td>A number that identifies a network service. Example: 8000.</td></tr>
+<tr><td><b>Service name</b></td><td>The name of a container in Compose. Other containers use it as a host name. Example: <code>backend</code>.</td></tr>
+</table>
+
+<h2 id="s3">3. The dependencies of the system</h2>
+<table>
+<tr><th>Dependency</th><th>Version</th><th>Job</th><th>Data lives in</th></tr>
+<tr><td>Redis</td><td>7.2 or later</td><td>Refresh sessions, JWT blacklist, rate limits, response cache, degraded counter.</td><td>Redis server memory + append-only file.</td></tr>
+<tr><td>MongoDB</td><td>7</td><td>Users, conversations, messages, documents, <code>usage_logs</code>.</td><td>MongoDB data directory.</td></tr>
+<tr><td>ChromaDB</td><td>1.5.9</td><td>Vector chunks for retrieval. Always filtered by <code>user_id</code>.</td><td>Local disk or the Chroma server volume.</td></tr>
+<tr><td>Gemini API</td><td>cloud service</td><td>Embeddings (<code>gemini-embedding-2</code>) and answers (<code>gemini-3.6-flash</code>).</td><td>No local data. Needs a key.</td></tr>
+<tr><td>Docker</td><td>Engine + Compose v2</td><td>Runs containers (Phase 10).</td><td>Images, volumes, networks.</td></tr>
+</table>
+<div class="warn"><strong>Redis rule.</strong> The code uses <code>GETDEL</code> and <code>SET ... EXAT ... NX</code>. You must use Redis server 7.2 or later. The Python library <code>redis==8.1.0</code> is only a client. It does not start a server.</div>
+
+<h2 id="s4">4. Set up Redis and MongoDB now</h2>
+<p>You have two paths. Path A is fast. Path B is a native Windows install.</p>
+
+<h3>4.1 Path A — containers for the dependencies (recommended on Windows)</h3>
+<p>Redis has no official Windows build. Docker is the fastest way on Windows.</p>
+<pre><span class="c"># Redis 7.2 with an append-only file in a named volume</span>
+docker run -d --name redis-dev -p 6379:6379 -v redis-dev:/data redis:7.2-alpine redis-server --appendonly yes
+
+<span class="c"># MongoDB 7 with a named volume for the data</span>
+docker run -d --name mongo-dev -p 27017:27017 -v mongo-dev:/data/db mongo:7</pre>
+<p>These two containers stay in the background. The backend uses them through <code>localhost</code>.</p>
+
+<h3>4.2 Path B — native Windows install</h3>
+<ul>
+  <li><b>MongoDB:</b> Install MongoDB Community Server 7 for Windows. The installer can start MongoDB as a Windows service on port 27017.</li>
+  <li><b>Redis:</b> Use Memurai (a Redis-compatible Windows server), or install Redis inside WSL2 (<code>sudo apt install redis-server</code>).</li>
+</ul>
+
+<h3>4.3 Check the services</h3>
+<pre><span class="c"># Redis answers PONG</span>
+docker exec redis-dev redis-cli ping
+<span class="c"># MongoDB answers 1</span>
+docker exec mongo-dev mongosh --quiet --eval "db.adminCommand('ping').ok"</pre>
+<p>For a native install, use <code>mongosh "mongodb://localhost:27017"</code> and a local <code>redis-cli ping</code>.</p>
+
+<h3>4.4 The .env file</h3>
+<p>The backend reads configuration from the environment. Put these keys in the root <code>.env</code> file. Never replace the file. Add the missing keys only.</p>
+<table>
+<tr><th>Key</th><th>Example</th><th>Notes</th></tr>
+<tr><td><code>JWT_SECRET_KEY</code></td><td>a long random string</td><td>Must be 32 bytes or more. HS256.</td></tr>
+<tr><td><code>JWT_ISSUER</code></td><td><code>rag-learning-api</code></td><td>Default value exists.</td></tr>
+<tr><td><code>JWT_AUDIENCE</code></td><td><code>rag-learning-api-users</code></td><td>Default value exists.</td></tr>
+<tr><td><code>REDIS_URL</code></td><td><code>redis://localhost:6379/0</code></td><td>Compose overrides this to <code>redis://redis:6379/0</code>.</td></tr>
+<tr><td><code>MONGODB_URI</code></td><td><code>mongodb://localhost:27017</code></td><td>Compose overrides this to <code>mongodb://mongo:27017</code>.</td></tr>
+<tr><td><code>MONGODB_DATABASE</code></td><td><code>agent</code></td><td>Database name.</td></tr>
+<tr><td><code>GEMINI_API_KEY</code> or <code>GOOGLE_API_KEY</code></td><td>your Gemini key</td><td>The <code>google-genai</code> library reads either name. Set exactly one; <code>GOOGLE_API_KEY</code> wins if both exist.</td></tr>
+<tr><td><code>REFRESH_COOKIE_SECURE</code></td><td><code>false</code> in dev</td><td>Must be <code>false</code> over HTTP. Keep <code>true</code> in production.</td></tr>
+</table>
+<div class="warn"><strong>First start needs the Gemini key.</strong> If the Chroma collection is empty, the backend reads <code>data/*.txt</code> and makes embeddings. This calls Gemini. Without a Gemini key, the backend stops and restarts in a loop. If <code>data/*.txt</code> is empty, the API still starts, but <code>/ready</code> stays 503 until a user uploads a document. The dev stack bind-mounts <code>app/</code> and <code>phase1.py</code>, not <code>data/</code>; rebuild the backend image after editing <code>data/*.txt</code> so the new corpus is baked in and ingested on the next start.</div>
+
+<h2 id="s5">5. What Docker is</h2>
+<p>Docker puts the code, the libraries, and the runtime into one image. The image runs as a container on any machine with Docker. The container uses the same libraries everywhere. This removes the "it works on my machine" problem.</p>
+<p>Docker Compose starts five services together. It puts them on one private network. A service finds another service by its name. Example: the frontend finds the backend at <code>http://backend:8000</code>.</p>
+
+<h2 id="s6">6. The backend image</h2>
+<p>The file <code>Dockerfile</code> (project root) builds the backend image.</p>
+<pre>FROM python:3.11-slim
+
+# Optional PyPI mirror for slow networks. The default is the official index.
+ARG PIP_INDEX_URL=https://pypi.org/simple
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=300 \
+    PIP_RETRIES=10
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+# Do not upgrade pip: the base image's pip is enough, and this avoids
+# one more large download from the package index.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install torch --index-url https://download.pytorch.org/whl/cpu \
+    && attempt=1 \
+    && while ! pip install --index-url "$PIP_INDEX_URL" -r requirements.txt; do \
+         attempt=$((attempt + 1)); \
+         if [ "$attempt" -gt 10 ]; then \
+           echo "pip install failed after 10 attempts" >&2; \
+           exit 1; \
+         fi; \
+         echo "pip install failed; retrying ($attempt/10)..." >&2; \
+         sleep 5; \
+       done
+
+COPY . .
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]</pre>
+<table>
+<tr><th>Instruction</th><th>Job</th></tr>
+<tr><td><code>FROM python:3.11-slim</code></td><td>Start from a small Python 3.11 image. All pinned packages support Python 3.11.</td></tr>
+<tr><td><code>ENV ...</code></td><td>Unbuffered logs for Docker. No <code>.pyc</code> files.</td></tr>
+<tr><td><code>WORKDIR /app</code></td><td>All later commands run in <code>/app</code>.</td></tr>
+<tr><td><code>COPY requirements.txt .</code></td><td>Copy only the requirements first. Docker caches this layer. Code changes do not reinstall packages.</td></tr>
+<tr><td><code>RUN --mount=type=cache ...</code></td><td>A BuildKit cache mount holds the pip download cache. The cache is not in the image. A retried build does not download packages again.</td></tr>
+<tr><td><code>pip install torch ... cpu</code></td><td>Install the CPU-only torch first. The reranker is off by default. This saves about 2 GB.</td></tr>
+<tr><td><code>pip install -r requirements.txt</code></td><td>Install the rest of the pinned packages. The bounded retry loop handles a transient truncated download or hash mismatch without failing the whole image build.</td></tr>
+<tr><td><code>COPY . .</code></td><td>Copy the application code and <code>data/*.txt</code>. The <code>.dockerignore</code> keeps <code>.env</code>, tests, and caches out of the image.</td></tr>
+<tr><td><code>EXPOSE 8000</code></td><td>Documentation only. The port mapping is in the Compose file.</td></tr>
+<tr><td><code>CMD ...</code></td><td>Start Uvicorn on all interfaces. No <code>--reload</code> here. The production image is the default.</td></tr>
+</table>
+<p>The file <code>.dockerignore</code> (project root) keeps unnecessary data out of the image:</p>
+<pre>.git
+.gitignore
+.env
+.venv
+__pycache__/
+**/__pycache__/
+*.pyc
+chroma_data/
+runtime_chroma_data/
+uploads/
+certs/
+tests/
+frontend/
+eval_cases.json
+langsmith_eval.py
+*.md
+*.html
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.prod.yml</pre>
+<div class="okbox"><strong>Secret rule.</strong> <code>.env</code> is in <code>.dockerignore</code>. Secrets never go into the image. Compose passes them at run time.</div>
+
+<h2 id="s7">7. The frontend image</h2>
+<p>The file <code>frontend/Dockerfile</code> uses two stages. Stage 1 builds the React files with Node. Stage 2 serves the files with nginx. The build tools do not go into the final image.</p>
+<pre>FROM node:22-alpine AS build
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
+
+FROM nginx:1.27-alpine
+
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/dist /usr/share/nginx/html
+
+EXPOSE 80</pre>
+<table>
+<tr><th>Stage</th><th>Job</th></tr>
+<tr><td><code>node:22-alpine AS build</code></td><td>Build stage. <code>npm ci</code> installs exact locked packages. <code>npm run build</code> makes <code>frontend/dist</code>.</td></tr>
+<tr><td><code>nginx:1.27-alpine</code></td><td>Run stage. Copy only <code>dist</code> and the nginx configuration. The image stays small.</td></tr>
+</table>
+<p>The file <code>frontend/nginx.conf</code> serves the site and proxies the API. It keeps the same-origin rule. The browser talks only to nginx.</p>
+<pre>server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    client_max_body_size 10m;
+
+    location /api/ {
+        proxy_pass http://backend:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    location = /health {
+        proxy_pass http://backend:8000/health;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location = /ready {
+        proxy_pass http://backend:8000/ready;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}</pre>
+<table>
+<tr><th>Rule</th><th>Why</th></tr>
+<tr><td><code>proxy_pass http://backend:8000</code></td><td><code>backend</code> is the Compose service name. Docker DNS finds it.</td></tr>
+<tr><td><code>proxy_buffering off</code></td><td>The chat answer is an SSE stream. Buffering would delay the tokens.</td></tr>
+<tr><td><code>proxy_read_timeout 300s</code></td><td>Agent loops and long answers need more than 60 seconds.</td></tr>
+<tr><td><code>client_max_body_size 10m</code></td><td>Document uploads. The app limit is 5 MB by default.</td></tr>
+<tr><td><code>try_files ... /index.html</code></td><td>React single-page app. Unknown paths return <code>index.html</code>.</td></tr>
+</table>
+<p>The file <code>frontend/.dockerignore</code> keeps build output and test data out of the build context:</p>
+<pre>node_modules
+dist
+test-results
+tests
+.env
+.env.example
+playwright.config.js
+Dockerfile
+.dockerignore</pre>
+<div class="warn"><strong>Node version note.</strong> <code>frontend/package.json</code> declares <code>"node": "&gt;=22.12.0"</code>, and Vite 8 needs Node 20.19 or later. The Dockerfile uses <code>node:22-alpine</code> to match the engines field.</div>
+
+<h2 id="s8">8. ChromaDB: two modes</h2>
+<p>The backend supports two Chroma modes. The environment variable <code>CHROMA_URL</code> selects the mode.</p>
+<table>
+<tr><th>Mode</th><th><code>CHROMA_URL</code></th><th>Client</th><th>Data lives in</th></tr>
+<tr><td>Embedded (default)</td><td>not set</td><td><code>chromadb.PersistentClient</code></td><td><code>chroma_data/</code> on the local disk.</td></tr>
+<tr><td>Server (containers)</td><td><code>http://chroma:8000</code></td><td><code>chromadb.HttpClient</code></td><td>The <code>chroma-data</code> named volume.</td></tr>
+</table>
+<p>The function <code>phase1.build_chroma_client</code> makes the client. An empty or absent URL keeps the old embedded behavior. Nothing breaks for local development.</p>
+<p>The two modes use different clients. Do not point them at the same data directory at the same time.</p>
+
+<h2 id="s9">9. Phase 10 — Docker Compose</h2>
+<div class="okbox"><strong>Why tenth:</strong> Deployment. Do after all features are stable.</div>
+<h3>9.1 What to build</h3>
+<ul>
+  <li>Dockerfile for the backend: Python 3.11-slim, install requirements, run uvicorn.</li>
+  <li>Dockerfile for the frontend: Node 20-alpine build, then nginx serve.</li>
+  <li><code>docker-compose.yml</code> with services: backend, frontend, redis, mongo, chroma.</li>
+  <li>Health checks for all services.</li>
+  <li><code>.dockerignore</code> for both images.</li>
+  <li>Volume mounts for ChromaDB persistence.</li>
+  <li>Environment variable passthrough from <code>.env</code>.</li>
+  <li><code>docker-compose.prod.yml</code> override for production: no reload, nginx SSL.</li>
+</ul>
+<h3>9.2 The network diagram</h3>
+<figure>
+<svg viewBox="0 0 720 330" role="img" aria-label="Docker Compose service diagram">
+  <defs><marker id="d1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#333"/></marker></defs>
+  <rect x="10" y="120" width="110" height="60" rx="8" fill="#eaf1ff" stroke="#0b5fff"/><text x="65" y="144" text-anchor="middle" font-size="12" font-weight="bold">Browser</text><text x="65" y="161" text-anchor="middle" font-size="11">same origin</text>
+  <rect x="160" y="30" width="520" height="270" rx="10" fill="none" stroke="#1a1a1a" stroke-dasharray="6,4"/>
+  <text x="175" y="52" font-size="12" font-weight="bold">Docker Compose network (rag-learning)</text>
+  <rect x="180" y="110" width="140" height="70" rx="8" fill="#fff" stroke="#1a1a1a" stroke-width="2"/><text x="250" y="134" text-anchor="middle" font-size="12" font-weight="bold">frontend</text><text x="250" y="151" text-anchor="middle" font-size="11">nginx :80</text><text x="250" y="166" text-anchor="middle" font-size="11">proxies /api /health /ready</text>
+  <rect x="370" y="110" width="140" height="70" rx="8" fill="#fff" stroke="#1a1a1a" stroke-width="2"/><text x="440" y="134" text-anchor="middle" font-size="12" font-weight="bold">backend</text><text x="440" y="151" text-anchor="middle" font-size="11">uvicorn :8000</text><text x="440" y="166" text-anchor="middle" font-size="11">app.main:app</text>
+  <rect x="560" y="70" width="110" height="44" rx="8" fill="#e6f5ec" stroke="#0a7a3d"/><text x="615" y="90" text-anchor="middle" font-size="12" font-weight="bold">redis</text><text x="615" y="105" text-anchor="middle" font-size="11">:6379</text>
+  <rect x="560" y="124" width="110" height="44" rx="8" fill="#e6f5ec" stroke="#0a7a3d"/><text x="615" y="144" text-anchor="middle" font-size="12" font-weight="bold">mongo</text><text x="615" y="159" text-anchor="middle" font-size="11">:27017</text>
+  <rect x="560" y="178" width="110" height="44" rx="8" fill="#e6f5ec" stroke="#0a7a3d"/><text x="615" y="198" text-anchor="middle" font-size="12" font-weight="bold">chroma</text><text x="615" y="213" text-anchor="middle" font-size="11">:8000</text>
+  <rect x="370" y="240" width="300" height="44" rx="8" fill="#fdf3e3" stroke="#935705"/><text x="520" y="260" text-anchor="middle" font-size="12" font-weight="bold">Gemini API (cloud)</text><text x="520" y="275" text-anchor="middle" font-size="11">embeddings + answers</text>
+  <line x1="120" y1="150" x2="178" y2="145" stroke="#333" stroke-width="1.5" marker-end="url(#d1)"/>
+  <line x1="320" y1="140" x2="368" y2="140" stroke="#333" stroke-width="1.5" marker-end="url(#d1)"/>
+  <line x1="510" y1="120" x2="558" y2="96" stroke="#333" stroke-width="1.5" marker-end="url(#d1)"/>
+  <line x1="510" y1="140" x2="558" y2="144" stroke="#333" stroke-width="1.5" marker-end="url(#d1)"/>
+  <line x1="510" y1="160" x2="558" y2="194" stroke="#333" stroke-width="1.5" marker-end="url(#d1)"/>
+  <line x1="440" y1="180" x2="460" y2="238" stroke="#333" stroke-width="1.5" marker-end="url(#d1)"/>
+  <text x="175" y="325" font-size="12">Only frontend :80 and backend :8000 are open to the host. Redis, Mongo, and Chroma stay private.</text>
+</svg>
+<figcaption>Fig. 1 — Five services on one private network. The browser reaches nginx. nginx reaches the backend. The backend reaches the three stores.</figcaption>
+</figure>
+<h3>9.3 The services and the health checks</h3>
+<table>
+<tr><th>Service</th><th>Image or build</th><th>Host port</th><th>Volume</th><th>Health check</th></tr>
+<tr><td><code>frontend</code></td><td>build <code>frontend/</code></td><td>80</td><td>none</td><td><code>wget -q -O /dev/null http://127.0.0.1/health</code></td></tr>
+<tr><td><code>backend</code></td><td>build <code>.</code></td><td>8000</td><td><code>uploads-data</code> → <code>/app/uploads</code></td><td>Python urllib opens <code>/health</code></td></tr>
+<tr><td><code>redis</code></td><td><code>redis:7.2-alpine</code></td><td>none</td><td><code>redis-data</code> → <code>/data</code></td><td><code>redis-cli ping</code></td></tr>
+<tr><td><code>mongo</code></td><td><code>mongo:7</code></td><td>none</td><td><code>mongo-data</code> → <code>/data/db</code></td><td><code>mongosh</code> admin ping</td></tr>
+<tr><td><code>chroma</code></td><td>build <code>chroma/</code> from <code>chromadb/chroma:1.5.9</code></td><td>none</td><td><code>chroma-data</code> → <code>/data</code></td><td><code>curl -fsS http://localhost:8000/api/v2/heartbeat</code></td></tr>
+</table>
+<p>The backend starts only after redis, mongo, and chroma are healthy. The frontend starts only after the backend is healthy. This is <code>depends_on</code> with <code>condition: service_healthy</code>.</p>
+<h3>9.4 The compose file</h3>
+<pre>name: rag-learning
+
+services:
+  redis:
+    image: redis:7.2-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  chroma:
+    build:
+      context: ./chroma
+    image: rag-learning-chroma:1.5.9
+    volumes:
+      - chroma-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v2/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MONGODB_URI: mongodb://mongo:27017
+      MONGODB_DATABASE: agent
+      CHROMA_URL: http://chroma:8000
+      REFRESH_COOKIE_SECURE: "false"
+      UPLOAD_DIR: uploads
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - ./app:/app/app
+      - ./phase1.py:/app/phase1.py
+      - uploads-data:/app/uploads
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  mongo-data:
+  chroma-data:
+  uploads-data:</pre>
+<p>Notes:</p>
+<ul>
+  <li><code>env_file: .env</code> passes your secrets into the backend container. The <code>environment:</code> block overrides the store URLs to the service names.</li>
+  <li>The base file is for development. It uses <code>--reload</code> and live code mounts.</li>
+  <li>Redis, MongoDB, and Chroma have no host ports. They stay private. Add a port mapping only if a tool on the host needs direct access.</li>
+</ul>
+<h3>9.5 The production override</h3>
+<p>The file <code>docker-compose.prod.yml</code> changes three things: no reload, secure cookies, and nginx with TLS on port 443.</p>
+<pre>services:
+  backend:
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      REFRESH_COOKIE_SECURE: "true"
+    volumes:
+      - uploads-data:/app/uploads
+
+  frontend:
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./certs:/etc/nginx/certs:ro
+      - ./frontend/nginx.prod.conf:/etc/nginx/conf.d/default.conf:ro</pre>
+<p>Put the TLS files in the <code>certs/</code> folder:</p>
+<ul>
+  <li><code>certs/server.crt</code> — the certificate.</li>
+  <li><code>certs/server.key</code> — the private key.</li>
+</ul>
+<p>For a local test, make a self-signed certificate with OpenSSL:</p>
+<pre>openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/server.key -out certs/server.crt -days 365 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"</pre>
+<p>The file <code>frontend/nginx.prod.conf</code> listens on 443 with TLS. Port 80 answers with a redirect to HTTPS. The proxy rules are the same as in the development file.</p>
+<h3>9.6 Files to touch</h3>
+<table>
+<tr><th>File</th><th>Status</th></tr>
+<tr><td><code>Dockerfile</code></td><td>new</td></tr>
+<tr><td><code>.dockerignore</code></td><td>new</td></tr>
+<tr><td><code>frontend/Dockerfile</code></td><td>new</td></tr>
+<tr><td><code>frontend/.dockerignore</code></td><td>new</td></tr>
+<tr><td><code>frontend/nginx.conf</code></td><td>new</td></tr>
+<tr><td><code>frontend/nginx.prod.conf</code></td><td>new</td></tr>
+<tr><td><code>docker-compose.yml</code></td><td>new</td></tr>
+<tr><td><code>docker-compose.prod.yml</code></td><td>new</td></tr>
+<tr><td><code>phase1.py</code></td><td>changed — <code>build_chroma_client</code> with the <code>CHROMA_URL</code> switch</td></tr>
+<tr><td><code>tests/test_chroma_mode.py</code></td><td>new — no live Chroma needed</td></tr>
+<tr><td><code>certs/.gitkeep</code></td><td>new — placeholder for TLS files</td></tr>
+</table>
+<h3>9.7 Acceptance criteria</h3>
+<table>
+<tr><th>Test</th><th>Command</th><th>Expected result</th></tr>
+<tr><td>All services start</td><td><code>docker compose up -d --build</code></td><td><code>docker compose ps</code> shows 5 services, all <code>healthy</code>.</td></tr>
+<tr><td>Backend is healthy on 8000</td><td><code>http://localhost:8000/health</code></td><td><code>{"status":"ok"}</code></td></tr>
+<tr><td>Frontend serves on 80</td><td><code>http://localhost/</code></td><td>The chat page loads.</td></tr>
+<tr><td>Inter-service communication</td><td><code>http://localhost/health</code></td><td><code>{"status":"ok"}</code> — this answer comes through nginx → backend.</td></tr>
+<tr><td>Stores work together</td><td>Register and log in on the page</td><td>MongoDB saves the user. Redis saves the session.</td></tr>
+</table>
+
+<h2 id="s10">10. Run and check</h2>
+<h3>10.1 Development stack</h3>
+<pre><span class="c"># 1. Start Docker Desktop first. Check the engine:</span>
+docker info
+
+<span class="c"># 2. Validate the files without starting anything:</span>
+docker compose config -q
+
+<span class="c"># 3. Build the images and start all services:</span>
+docker compose up -d --build
+
+<span class="c"># 4. Wait, then read the status. All services must be healthy:</span>
+docker compose ps
+
+<span class="c"># 5. Check the endpoints:</span>
+Invoke-WebRequest http://localhost:8000/health
+Invoke-WebRequest http://localhost/health
+Invoke-WebRequest http://localhost/</pre>
+<p>Open <code>http://localhost</code> in the browser. Register a user. Upload a non-empty <code>.txt</code> file, then ask a question. The first start also ingests <code>data/*.txt</code> into Chroma for the <code>eval_user</code> tenant. This takes a moment and needs the Gemini key. If <code>data/*.txt</code> is empty, the backend is still live on <code>/health</code> but <code>/ready</code> returns 503 until a document is uploaded.</p>
+<h3>10.2 Production stack (local test)</h3>
+<pre><span class="c"># 1. Make the TLS files (see section 9.5)</span>
+mkdir certs
+openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/server.key -out certs/server.crt -days 365 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+
+<span class="c"># 2. Start with both compose files. The second overrides the first:</span>
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+
+<span class="c"># 3. Check 443</span>
+Invoke-WebRequest https://localhost/health -SkipCertificateCheck</pre>
+<h3>10.3 Stop the stack</h3>
+<pre>docker compose down</pre>
+<div class="warn"><strong>Data loss warning.</strong> <code>docker compose down -v</code> also deletes the named volumes. All users, chats, uploads, and vectors are lost.</div>
+
+<h2 id="s11">11. Problems and fixes</h2>
+<table>
+<tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+<tr><td>Port 80 is already in use</td><td>IIS or another web server holds port 80.</td><td>Change the frontend mapping to <code>"8080:80"</code>. Open <code>http://localhost:8080</code>.</td></tr>
+<tr><td>The backend container restarts in a loop</td><td><code>GEMINI_API_KEY</code> (or <code>GOOGLE_API_KEY</code>) or <code>JWT_SECRET_KEY</code> is missing in <code>.env</code>.</td><td>Add the key. Run <code>docker compose up -d</code> again. Read the log with <code>docker compose logs backend</code>.</td></tr>
+<tr><td>Login works, but refresh fails over HTTP</td><td><code>REFRESH_COOKIE_SECURE=true</code> on an HTTP page.</td><td>Use the base compose file. It sets the value to <code>false</code>. Use <code>true</code> only with TLS.</td></tr>
+<tr><td>The image is very large</td><td>torch with CUDA libraries.</td><td>Keep the CPU-only torch step in the Dockerfile. The reranker stays off by default.</td></tr>
+<tr><td>The pip download is very slow or times out</td><td><code>files.pythonhosted.org</code> is slow on your network.</td><td>Build with a mirror, for example <code>docker compose build --build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ backend</code>. The default remains the official index.</td></tr>
+<tr><td>The frontend build stops on Node</td><td><code>frontend/package.json</code> requires Node 22.12 or later.</td><td>Keep the Dockerfile on <code>node:22-alpine</code> (or newer).</td></tr>
+<tr><td>Chroma health check fails</td><td>The upstream image has no Python or curl; the thin <code>chroma/Dockerfile</code> adds curl.</td><td>Rebuild with <code>docker compose build --no-cache chroma</code>. Keep the pinned base <code>chromadb/chroma:1.5.9</code>.</td></tr>
+<tr><td>Streaming looks slow or blocked</td><td>A proxy buffers the SSE stream.</td><td>Keep <code>proxy_buffering off</code> in the <code>/api/</code> location.</td></tr>
+<tr><td>Uploads return 413</td><td>The nginx body limit is too low.</td><td>Keep <code>client_max_body_size 10m</code>. It is higher than <code>MAX_UPLOAD_BYTES</code>.</td></tr>
+<tr><td>Data disappears after a restart</td><td>Volumes were removed with <code>down -v</code>.</td><td>Do not use <code>-v</code> in normal operation. Check volumes with <code>docker volume ls</code>.</td></tr>
+</table>
+
+<h2 id="s12">12. Safety rules</h2>
+<ol>
+  <li>Never put secrets in an image. Keep <code>.env</code> in <code>.dockerignore</code>.</li>
+  <li>Never commit <code>.env</code>, TLS files, or volumes. <code>certs/</code>, <code>chroma_data/</code>, and <code>uploads/</code> are ignored by Git.</li>
+  <li>Keep the access rules. The browser talks only to nginx. The Gemini key stays on the server.</li>
+  <li>Keep <code>REFRESH_COOKIE_SECURE=true</code> in production. Use <code>false</code> only for local HTTP development.</li>
+  <li>Pin image versions. Unpinned tags change without warning.</li>
+  <li>Do not use <code>docker compose down -v</code> on a system with real data.</li>
+  <li>One phase at a time. Phase 9 (pytest migration) is still open. Phase 10 does not block it.</li>
+</ol>
+</main>
+<footer>Generated from the repo state after Phase 10 (Docker Compose). Remaining: Phase 9 (pytest migration). See <code>architecture.html</code> for the full system.</footer>
+</body>
+</html>

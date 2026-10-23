@@ -1,0 +1,9 @@
+node_modules
+dist
+test-results
+tests
+.env
+.env.example
+playwright.config.js
+Dockerfile
+.dockerignore
