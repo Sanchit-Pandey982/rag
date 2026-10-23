@@ -5,4 +5,15 @@ __pycache__/
 chroma_data
 runtime_chroma_data
 uploads/
+certs/*
+!certs/.gitkeep
 AGENT_PROJECT_EXPLANATION.html
+
+# Smoke-test and local run artifacts (may contain live credentials)
+cookies.txt
+*.log
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
