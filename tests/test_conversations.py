@@ -150,9 +150,17 @@ class ConversationPhaseTests(unittest.TestCase):
         turn_id = run(self.service.start_turn(conversation_id, user_id, question))
         run(self.service.complete_turn(conversation_id, user_id, turn_id, answer))
         if at is not None:
+            # Within a turn the assistant reply is logically after the question.
+            # Give it a strictly later timestamp so history ordering is
+            # deterministic instead of depending on tie-breaking.
             for document in self.messages.documents:
                 if document["turn_id"] == turn_id:
-                    document["created_at"] = at
+                    offset = (
+                        timedelta(0)
+                        if document["role"] == "user"
+                        else timedelta(milliseconds=1)
+                    )
+                    document["created_at"] = at + offset
         return turn_id
 
     # -- creation ----------------------------------------------------
