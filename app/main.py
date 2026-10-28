@@ -30,7 +30,11 @@ from app.services.document_service import (
     DocumentService,
 )
 from app.services.rag_services import RAGService
-from app.services.rate_limit_service import RateLimitService
+from app.services.rate_limit_service import (
+    RateLimitService,
+    get_chat_daily_quota,
+    get_chat_quota_exempt_users,
+)
 from app.services.refresh_token_service import RefreshTokenService
 from app.services.token_blacklist_service import TokenBlacklistService
 from app.services.usage_service import UsageService
@@ -120,7 +124,12 @@ async def lifespan(
         # Phase 4: revoked access-token JTIs, same client, separate namespace.
         app.state.token_blacklist_service = TokenBlacklistService(redis_client)
         # Phase 3.9: same client, separate `rate_limit:` namespace.
-        app.state.rate_limit_service = RateLimitService(redis_client)
+        # Wave 1.3 adds the per-user daily chat quota on the same client.
+        app.state.rate_limit_service = RateLimitService(
+            redis_client,
+            daily_quota=get_chat_daily_quota(),
+            quota_exempt_users=get_chat_quota_exempt_users(),
+        )
         # Phase 5: same client, `response_cache:` entries + per-user
         # generation counters. Fail-open: Redis trouble means uncached
         # answers, never failed chat turns.

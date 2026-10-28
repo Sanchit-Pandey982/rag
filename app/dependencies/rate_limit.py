@@ -96,6 +96,31 @@ async def enforce_upload_rate_limit(
     )
 
 
+async def _enforce_daily_quota(request: Request, *, user_id: str) -> None:
+    service = _service(request)
+    if service is None:
+        logger.warning(
+            "Rate limit service not configured; allowing daily quota check"
+        )
+        return
+    try:
+        await service.check_daily_quota(user_id=user_id)
+    except RateLimitUnavailable:
+        # Same fail-open rule as the burst limiter: a Redis outage must
+        # not take chat down for users who already hold a valid token.
+        logger.warning("Rate limiter unavailable; skipping daily quota check")
+        return
+    except RateLimitExceeded as error:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                "Daily chat quota exceeded. Please try again after "
+                "midnight UTC."
+            ),
+            headers={"Retry-After": str(error.retry_after_seconds)},
+        ) from error
+
+
 async def enforce_chat_rate_limit(
     request: Request,
     authorized: Annotated[ChatRequest, Depends(authorize_chat_request)],
@@ -103,3 +128,4 @@ async def enforce_chat_rate_limit(
     await _enforce(
         request, scope=SCOPE_CHAT, key=f"user:{authorized.user_id}"
     )
+    await _enforce_daily_quota(request, user_id=authorized.user_id)

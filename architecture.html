@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG Learning System — End-to-End Architecture</title>
+<style>
+  :root {
+    --bg: #ffffff; --ink: #1a1a1a; --muted: #5b5b5b;
+    --line: #d8d8d8; --accent: #0b5fff; --accent-bg: #eaf1ff;
+    --ok: #0a7a3d; --ok-bg: #e6f5ec; --todo: #935705; --todo-bg: #fdf3e3;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    color: var(--ink); background: var(--bg); margin: 0; line-height: 1.55; }
+  header { background: #0d1117; color: #fff; padding: 2.2rem 1.5rem; }
+  header h1 { margin: 0 0 .4rem; font-size: 1.7rem; }
+  header p { margin: .2rem 0; color: #c9d1d9; max-width: 60rem; }
+  .note { display: inline-block; background: #1f6feb; border-radius: 4px;
+    font-size: .75rem; padding: .15rem .5rem; margin-top: .6rem; }
+  main { max-width: 62rem; margin: 0 auto; padding: 1.5rem 1.2rem 4rem; }
+  nav.toc { background: #f6f8fa; border: 1px solid var(--line);
+    border-radius: 8px; padding: 1rem 1.4rem; margin: 1.5rem 0 2rem; }
+  nav.toc ol { margin: .4rem 0; padding-left: 1.3rem; columns: 2; }
+  nav.toc li { margin: .15rem 0; font-size: .92rem; }
+  nav.toc a { color: var(--accent); text-decoration: none; }
+  h2 { border-bottom: 2px solid var(--ink); padding-bottom: .3rem;
+    margin-top: 2.6rem; font-size: 1.35rem; }
+  h3 { margin-top: 1.6rem; font-size: 1.05rem; }
+  p, li { font-size: .95rem; }
+  code { font-family: var(--mono); font-size: .85em; background: #f1f3f5;
+    padding: .1em .35em; border-radius: 4px; }
+  pre { background: #0d1117; color: #e6edf3; padding: 1rem 1.2rem;
+    border-radius: 8px; overflow-x: auto; font-size: .85rem; }
+  pre .c { color: #8b949e; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0;
+    font-size: .9rem; }
+  th, td { border: 1px solid var(--line); padding: .5rem .7rem;
+    text-align: left; vertical-align: top; }
+  th { background: #f6f8fa; }
+  .badge { display: inline-block; font-size: .72rem; font-weight: 700;
+    border-radius: 20px; padding: .1rem .6rem; white-space: nowrap; }
+  .done { background: var(--ok-bg); color: var(--ok); }
+  .left { background: var(--todo-bg); color: var(--todo); }
+  .flag { background: var(--accent-bg); color: var(--accent); }
+  figure { margin: 1.4rem 0; border: 1px solid var(--line);
+    border-radius: 8px; padding: 1rem; background: #fbfcfd; }
+  figcaption { font-size: .85rem; color: var(--muted); margin-top: .6rem; }
+  svg { width: 100%; height: auto; display: block; }
+  .warn { background: var(--todo-bg); border-left: 4px solid var(--todo);
+    padding: .7rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; }
+  .okbox { background: var(--ok-bg); border-left: 4px solid var(--ok);
+    padding: .7rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; }
+  footer { border-top: 1px solid var(--line); padding: 1.2rem;
+    color: var(--muted); font-size: .82rem; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>RAG Learning System — End-to-End Architecture</h1>
+  <p>This document describes the full system. It lists all parts. It shows how data moves. It lists all done features. It lists the work that is left.</p>
+  <p>Writing style: ASD-STE100 Simplified Technical English. Short sentences. Simple words. One idea per sentence.</p>
+  <span class="note">STATUS: PHASES 1–8, 10–12 DONE &nbsp;•&nbsp; PHASE 9 LEFT</span>
+</header>
+
+<main>
+<nav class="toc" aria-label="Contents">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#s1">1. What the system is</a></li>
+    <li><a href="#s2">2. System overview diagram</a></li>
+    <li><a href="#s3">3. Parts and stores</a></li>
+    <li><a href="#s4">4. Start-up order</a></li>
+    <li><a href="#s5">5. Auth flow</a></li>
+    <li><a href="#s6">6. Chat request flow</a></li>
+    <li><a href="#s7">7. RAG pipeline</a></li>
+    <li><a href="#s8">8. Agent loop and tools</a></li>
+    <li><a href="#s9">9. Feature catalogue</a></li>
+    <li><a href="#s10">10. Work that is left</a></li>
+    <li><a href="#s11">11. Configuration</a></li>
+    <li><a href="#s12">12. How to start the project</a></li>
+    <li><a href="#s13">13. API endpoints</a></li>
+    <li><a href="#s14">14. Design rules</a></li>
+  </ol>
+</nav>
+
+<h2 id="s1">1. What the system is</h2>
+<p>The system is a chat application. Users ask questions. The system answers from the users' own documents. It uses RAG (Retrieval Augmented Generation).</p>
+<p>Main ideas:</p>
+<ul>
+  <li>Each user owns separate documents. Users never see other users' data. Retrieval always filters by <code>user_id</code>.</li>
+  <li>The AI (Gemini) only uses retrieved text. If no text fits, it sends a fixed refusal.</li>
+  <li>An agent (Phase 11) can route, retry, and call tools (Phase 12).</li>
+  <li>Auth uses short access tokens and rotating refresh tokens in Redis.</li>
+</ul>
+
+<h2 id="s2">2. System overview diagram</h2>
+<figure>
+<svg viewBox="0 0 720 400" role="img" aria-label="System overview block diagram">
+  <defs><marker id="a1" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#333"/></marker></defs>
+  <rect x="20" y="30" width="150" height="70" rx="8" fill="#eaf1ff" stroke="#0b5fff"/><text x="95" y="58" text-anchor="middle" font-size="13" font-weight="bold">Browser</text><text x="95" y="76" text-anchor="middle" font-size="11">React + Vite</text>
+  <rect x="20" y="150" width="150" height="70" rx="8" fill="#eaf1ff" stroke="#0b5fff"/><text x="95" y="178" text-anchor="middle" font-size="13" font-weight="bold">Vite proxy</text><text x="95" y="196" text-anchor="middle" font-size="11">/api /health /ready</text>
+  <rect x="250" y="80" width="200" height="110" rx="8" fill="#fff" stroke="#1a1a1a" stroke-width="2"/><text x="350" y="108" text-anchor="middle" font-size="13" font-weight="bold">FastAPI backend</text><text x="350" y="128" text-anchor="middle" font-size="11">app.main:app</text><text x="350" y="145" text-anchor="middle" font-size="11">routes + services</text><text x="350" y="162" text-anchor="middle" font-size="11">agent + tools + RAG</text>
+  <rect x="520" y="20" width="180" height="60" rx="8" fill="#e6f5ec" stroke="#0a7a3d"/><text x="610" y="44" text-anchor="middle" font-size="13" font-weight="bold">Redis 7.2+</text><text x="610" y="61" text-anchor="middle" font-size="11">sessions, cache</text>
+  <rect x="520" y="95" width="180" height="60" rx="8" fill="#e6f5ec" stroke="#0a7a3d"/><text x="610" y="119" text-anchor="middle" font-size="13" font-weight="bold">MongoDB</text><text x="610" y="136" text-anchor="middle" font-size="11">users, chats, usage</text>
+  <rect x="520" y="170" width="180" height="60" rx="8" fill="#e6f5ec" stroke="#0a7a3d"/><text x="610" y="194" text-anchor="middle" font-size="13" font-weight="bold">ChromaDB</text><text x="610" y="211" text-anchor="middle" font-size="11">vectors (local disk)</text>
+  <rect x="520" y="245" width="180" height="60" rx="8" fill="#fdf3e3" stroke="#935705"/><text x="610" y="269" text-anchor="middle" font-size="13" font-weight="bold">Gemini API</text><text x="610" y="286" text-anchor="middle" font-size="11">embed + generate</text>
+  <rect x="250" y="250" width="200" height="60" rx="8" fill="#fff" stroke="#1a1a1a"/><text x="350" y="274" text-anchor="middle" font-size="13" font-weight="bold">Tavily / SerpAPI</text><text x="350" y="291" text-anchor="middle" font-size="11">web search tool only</text>
+  <line x1="95" y1="100" x2="95" y2="148" stroke="#333" stroke-width="1.5" marker-end="url(#a1)"/>
+  <line x1="170" y1="185" x2="248" y2="150" stroke="#333" stroke-width="1.5" marker-end="url(#a1)"/>
+  <line x1="450" y1="110" x2="518" y2="50" stroke="#333" stroke-width="1.5" marker-end="url(#a1)"/>
+  <line x1="450" y1="130" x2="518" y2="125" stroke="#333" stroke-width="1.5" marker-end="url(#a1)"/>
+  <line x1="450" y1="150" x2="518" y2="200" stroke="#333" stroke-width="1.5" marker-end="url(#a1)"/>
+  <line x1="450" y1="165" x2="518" y2="272" stroke="#333" stroke-width="1.5" marker-end="url(#a1)"/>
+  <line x1="350" y1="190" x2="350" y2="248" stroke="#333" stroke-width="1.5" marker-end="url(#a1)"/>
+  <text x="250" y="340" font-size="12">Backend reads all stores. Browser talks only to backend (same origin).</text>
+  <text x="250" y="358" font-size="12">Gemini keys stay on the server. The browser never holds secrets.</text>
+</svg>
+<figcaption>Fig. 1 — System blocks. The browser uses the backend. The backend uses four stores and two web APIs.</figcaption>
+</figure>
+
+<h2 id="s3">3. Parts and stores</h2>
+<h3>3.1 Code parts</h3>
+<table>
+<tr><th>Part</th><th>Files</th><th>Job</th></tr>
+<tr><td>Entry</td><td><code>app/main.py</code></td><td>Starts the app. Checks JWT config. Connects stores. Loads RAG.</td></tr>
+<tr><td>Routes</td><td><code>app/routes/auth.py, chat.py, conversations.py, documents.py, usage.py</code></td><td>HTTP endpoints. No business logic.</td></tr>
+<tr><td>RAG core</td><td><code>phase1.py</code> (<code>RAGSystem</code>)</td><td>Retrieve, build context, generate with Gemini.</td></tr>
+<tr><td>Services</td><td><code>app/services/</code> (15 modules)</td><td>Auth, chat flow, retrieval, rerank, cache, usage, rate limit.</td></tr>
+<tr><td>Agent</td><td><code>app/agents/</code> (state, nodes, graph, config)</td><td>Route, retrieve, generate, check quality, retry.</td></tr>
+<tr><td>Tools</td><td><code>app/tools/</code> (base, calculator, web_search, registry, config)</td><td>Math and web search for the agent.</td></tr>
+<tr><td>Frontend</td><td><code>frontend/src/</code> (React, SSE client)</td><td>Chat UI. Same-origin calls through Vite proxy.</td></tr>
+</table>
+<h3>3.2 Data stores</h3>
+<table>
+<tr><th>Store</th><th>Holds</th><th>Notes</th></tr>
+<tr><td>Redis 7.2+</td><td>Refresh sessions, JWT blacklist, rate limits, response cache, degraded counter</td><td>Needs <code>GETDEL</code> and <code>SET ... EXAT ... NX</code>.</td></tr>
+<tr><td>MongoDB</td><td>Users, conversations, messages, documents, <code>usage_logs</code></td><td>One client for the full app life.</td></tr>
+<tr><td>ChromaDB</td><td>Chunk vectors, local disk (<code>chroma_data/</code>)</td><td>Falls back to <code>runtime_chroma_data/</code>. Never commit these folders.</td></tr>
+</table>
+
+<h2 id="s4">4. Start-up order</h2>
+<p>The file <code>app/main.py</code> starts in this fixed order:</p>
+<ol>
+<li>Read and check JWT settings. Stop fast if they are bad.</li>
+<li>Ping Redis. Make session, blacklist, rate-limit, cache services.</li>
+<li>Ping MongoDB. Make auth, conversation, document, usage services.</li>
+<li>Build Chroma RAG. If the store is empty, load <code>data/*.txt</code>.</li>
+<li>Set <code>ready = true</code> only when Chroma holds documents.</li>
+</ol>
+<p><code>/health</code> always sends 200 (liveness). <code>/ready</code> sends 503 until step 5 is done (readiness).</p>
+
+<h2 id="s5">5. Auth flow</h2>
+<figure>
+<svg viewBox="0 0 720 250" role="img" aria-label="Auth flow block diagram">
+  <defs><marker id="a2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#333"/></marker></defs>
+  <rect x="10" y="90" width="110" height="60" rx="8" fill="#eaf1ff" stroke="#0b5fff"/><text x="65" y="114" text-anchor="middle" font-size="12" font-weight="bold">Browser</text><text x="65" y="131" text-anchor="middle" font-size="11">holds access</text><text x="65" y="144" text-anchor="middle" font-size="11">JWT in memory</text>
+  <rect x="170" y="20" width="150" height="60" rx="8" fill="#fff" stroke="#1a1a1a"/><text x="245" y="44" text-anchor="middle" font-size="12" font-weight="bold">POST login</text><text x="245" y="61" text-anchor="middle" font-size="11">access 15 min +</text><text x="245" y="74" text-anchor="middle" font-size="11">cookie 7 days</text>
+  <rect x="170" y="100" width="150" height="60" rx="8" fill="#fff" stroke="#1a1a1a"/><text x="245" y="124" text-anchor="middle" font-size="12" font-weight="bold">POST refresh</text><text x="245" y="141" text-anchor="middle" font-size="11">rotate via GETDEL</text>
+  <rect x="170" y="180" width="150" height="60" rx="8" fill="#fff" stroke="#1a1a1a"/><text x="245" y="204" text-anchor="middle" font-size="12" font-weight="bold">POST logout</text><text x="245" y="221" text-anchor="middle" font-size="11">delete + blacklist</text>
+  <rect x="380" y="60" width="150" height="120" rx="8" fill="#e6f5ec" stroke="#0a7a3d"/><text x="455" y="88" text-anchor="middle" font-size="12" font-weight="bold">Redis</text><text x="455" y="107" text-anchor="middle" font-size="11">auth:refresh:&lt;jti&gt;</text><text x="455" y="124" text-anchor="middle" font-size="11">auth:blacklist:&lt;jti&gt;</text><text x="455" y="141" text-anchor="middle" font-size="11">single GETDEL</text><text x="455" y="158" text-anchor="middle" font-size="11">rotation</text>
+  <rect x="580" y="90" width="130" height="60" rx="8" fill="#fff" stroke="#1a1a1a"/><text x="645" y="114" text-anchor="middle" font-size="12" font-weight="bold">Chat check</text><text x="645" y="131" text-anchor="middle" font-size="11">JWT sub =</text><text x="645" y="144" text-anchor="middle" font-size="11">user_id else 403</text>
+  <line x1="120" y1="120" x2="168" y2="50" stroke="#333" stroke-width="1.5" marker-end="url(#a2)"/>
+  <line x1="120" y1="130" x2="168" y2="130" stroke="#333" stroke-width="1.5" marker-end="url(#a2)"/>
+  <line x1="120" y1="140" x2="168" y2="210" stroke="#333" stroke-width="1.5" marker-end="url(#a2)"/>
+  <line x1="320" y1="50" x2="378" y2="90" stroke="#333" stroke-width="1.5" marker-end="url(#a2)"/>
+  <line x1="320" y1="130" x2="378" y2="120" stroke="#333" stroke-width="1.5" marker-end="url(#a2)"/>
+  <line x1="320" y1="210" x2="378" y2="150" stroke="#333" stroke-width="1.5" marker-end="url(#a2)"/>
+  <line x1="530" y1="120" x2="578" y2="120" stroke="#333" stroke-width="1.5" marker-end="url(#a2)"/>
+</svg>
+<figcaption>Fig. 2 — Auth blocks. Refresh cookie is HttpOnly, SameSite=Strict. 401 means log in again. 403 means wrong user. 503 means infra fault (retry).</figcaption>
+</figure>
+
+<h2 id="s6">6. Chat request flow</h2>
+<figure>
+<svg viewBox="0 0 720 300" role="img" aria-label="Chat request flow block diagram">
+  <defs><marker id="a3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#333"/></marker></defs>
+  <rect x="10" y="110" width="100" height="60" rx="8" fill="#eaf1ff" stroke="#0b5fff"/><text x="60" y="136" text-anchor="middle" font-size="12" font-weight="bold">Browser</text><text x="60" y="153" text-anchor="middle" font-size="11">SSE client</text>
+  <rect x="150" y="20" width="140" height="60" rx="8" fill="#fff" stroke="#1a1a1a"/><text x="220" y="44" text-anchor="middle" font-size="12" font-weight="bold">POST /chat</text><text x="220" y="61" text-anchor="middle" font-size="11">one JSON answer</text>
+  <rect x="150" y="100" width="140" height="60" rx="8" fill="#fff" stroke="#1a1a1a"/><text x="220" y="124" text-anchor="middle" font-size="12" font-weight="bold">POST /chat/sse</text><text x="220" y="141" text-anchor="middle" font-size="11">start→…→done</text>
+  <rect x="150" y="180" width="140" height="60" rx="8" fill="#fff" stroke="#1a1a1a"/><text x="220" y="204" text-anchor="middle" font-size="12" font-weight="bold">POST /chat/stream</text><text x="220" y="221" text-anchor="middle" font-size="11">plain text tokens</text>
+  <rect x="340" y="70" width="150" height="110" rx="8" fill="#fff" stroke="#1a1a1a" stroke-width="2"/><text x="415" y="96" text-anchor="middle" font-size="12" font-weight="bold">Orchestration</text><text x="415" y="114" text-anchor="middle" font-size="11">history + turn +</text><text x="415" y="131" text-anchor="middle" font-size="11">usage ledger</text><text x="415" y="148" text-anchor="middle" font-size="11">Mongo writes here</text>
+  <rect x="540" y="70" width="170" height="110" rx="8" fill="#e6f5ec" stroke="#0a7a3d"/><text x="625" y="96" text-anchor="middle" font-size="12" font-weight="bold">Agent or RAG</text><text x="625" y="114" text-anchor="middle" font-size="11">retrieve → generate</text><text x="625" y="131" text-anchor="middle" font-size="11">agent adds retry</text><text x="625" y="148" text-anchor="middle" font-size="11">+ tools if on</text>
+  <line x1="110" y1="130" x2="148" y2="50" stroke="#333" stroke-width="1.5" marker-end="url(#a3)"/>
+  <line x1="110" y1="140" x2="148" y2="130" stroke="#333" stroke-width="1.5" marker-end="url(#a3)"/>
+  <line x1="110" y1="150" x2="148" y2="210" stroke="#333" stroke-width="1.5" marker-end="url(#a3)"/>
+  <line x1="290" y1="60" x2="338" y2="100" stroke="#333" stroke-width="1.5" marker-end="url(#a3)"/>
+  <line x1="290" y1="130" x2="338" y2="125" stroke="#333" stroke-width="1.5" marker-end="url(#a3)"/>
+  <line x1="290" y1="205" x2="338" y2="150" stroke="#333" stroke-width="1.5" marker-end="url(#a3)"/>
+  <line x1="490" y1="125" x2="538" y2="125" stroke="#333" stroke-width="1.5" marker-end="url(#a3)"/>
+  <text x="150" y="270" font-size="12">SSE order is fixed: start → retrieval → token* → sources → done, or error.</text>
+  <text x="150" y="288" font-size="12">History writes live in orchestration, never inside RAGSystem.</text>
+</svg>
+<figcaption>Fig. 3 — Chat paths. All three share auth, history, and usage logging.</figcaption>
+</figure>
+
+<h2 id="s7">7. RAG pipeline</h2>
+<figure>
+<svg viewBox="0 0 720 260" role="img" aria-label="RAG pipeline block diagram">
+  <defs><marker id="a4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#333"/></marker></defs>
+  <rect x="10" y="100" width="110" height="60" rx="8" fill="#fff" stroke="#1a1a1a"/><text x="65" y="124" text-anchor="middle" font-size="12" font-weight="bold">Query</text><text x="65" y="141" text-anchor="middle" font-size="11">+ history</text>
+  <rect x="160" y="100" width="120" height="60" rx="8" fill="#fff" stroke="#1a1a1a"/><text x="220" y="124" text-anchor="middle" font-size="12" font-weight="bold">Vector search</text><text x="220" y="141" text-anchor="middle" font-size="11">Chroma, user_id</text>
+  <rect x="320" y="30" width="120" height="60" rx="8" fill="#eaf1ff" stroke="#0b5fff"/><text x="380" y="54" text-anchor="middle" font-size="12" font-weight="bold">Hybrid (opt)</text><text x="380" y="71" text-anchor="middle" font-size="11">BM25 + RRF</text>
+  <rect x="320" y="110" width="120" height="60" rx="8" fill="#eaf1ff" stroke="#0b5fff"/><text x="380" y="134" text-anchor="middle" font-size="12" font-weight="bold">Rerank (opt)</text><text x="380" y="151" text-anchor="middle" font-size="11">cross-encoder</text>
+  <rect x="480" y="100" width="110" height="60" rx="8" fill="#fff" stroke="#1a1a1a"/><text x="535" y="124" text-anchor="middle" font-size="12" font-weight="bold">Cache?</text><text x="535" y="141" text-anchor="middle" font-size="11">hit = reuse</text>
+  <rect x="620" y="100" width="90" height="60" rx="8" fill="#e6f5ec" stroke="#0a7a3d"/><text x="665" y="124" text-anchor="middle" font-size="12" font-weight="bold">Gemini</text><text x="665" y="141" text-anchor="middle" font-size="11">answer</text>
+  <line x1="120" y1="130" x2="158" y2="130" stroke="#333" stroke-width="1.5" marker-end="url(#a4)"/>
+  <line x1="280" y1="120" x2="318" y2="60" stroke="#333" stroke-width="1.5" marker-end="url(#a4)"/>
+  <line x1="280" y1="140" x2="318" y2="140" stroke="#333" stroke-width="1.5" marker-end="url(#a4)"/>
+  <line x1="440" y1="90" x2="478" y2="115" stroke="#333" stroke-width="1.5" marker-end="url(#a4)"/>
+  <line x1="440" y1="140" x2="478" y2="135" stroke="#333" stroke-width="1.5" marker-end="url(#a4)"/>
+  <line x1="590" y1="130" x2="618" y2="130" stroke="#333" stroke-width="1.5" marker-end="url(#a4)"/>
+  <text x="10" y="200" font-size="12">Rules: tenant filter never drops. Empty context → fixed refusal.</text>
+  <text x="10" y="218" font-size="12">Limits: k 1–10, query 1–4000 chars, history ≤ 20 (last 8 used).</text>
+  <text x="10" y="236" font-size="12">Long chats: summary + last 8 messages replace raw history.</text>
+</svg>
+<figcaption>Fig. 4 — RAG blocks. Optional steps are off by default and never break the base path.</figcaption>
+</figure>
+
+<h2 id="s8">8. Agent loop and tools</h2>
+<figure>
+<svg viewBox="0 0 720 330" role="img" aria-label="Agent loop block diagram">
+  <defs><marker id="a5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#333"/></marker></defs>
+  <rect x="270" y="10" width="180" height="50" rx="8" fill="#fff" stroke="#1a1a1a" stroke-width="2"/><text x="360" y="30" text-anchor="middle" font-size="12" font-weight="bold">decide_route</text><text x="360" y="47" text-anchor="middle" font-size="11">smalltalk → direct</text>
+  <rect x="60" y="100" width="150" height="60" rx="8" fill="#e6f5ec" stroke="#0a7a3d"/><text x="135" y="124" text-anchor="middle" font-size="12" font-weight="bold">answer directly</text><text x="135" y="141" text-anchor="middle" font-size="11">no LLM, conf 1.0</text>
+  <rect x="270" y="100" width="180" height="60" rx="8" fill="#eaf1ff" stroke="#0b5fff"/><text x="360" y="124" text-anchor="middle" font-size="12" font-weight="bold">use_tools</text><text x="360" y="141" text-anchor="middle" font-size="11">calculator / web</text>
+  <rect x="510" y="100" width="150" height="60" rx="8" fill="#fff" stroke="#1a1a1a"/><text x="585" y="124" text-anchor="middle" font-size="12" font-weight="bold">retrieve</text><text x="585" y="141" text-anchor="middle" font-size="11">RAG chunks</text>
+  <rect x="510" y="190" width="150" height="60" rx="8" fill="#fff" stroke="#1a1a1a"/><text x="585" y="214" text-anchor="middle" font-size="12" font-weight="bold">generate</text><text x="585" y="231" text-anchor="middle" font-size="11">Gemini answer</text>
+  <rect x="270" y="190" width="180" height="60" rx="8" fill="#fff" stroke="#1a1a1a" stroke-width="2"/><text x="360" y="214" text-anchor="middle" font-size="12" font-weight="bold">check_confidence</text><text x="360" y="231" text-anchor="middle" font-size="11">1 − mean_dist/2</text>
+  <rect x="60" y="190" width="150" height="60" rx="8" fill="#e6f5ec" stroke="#0a7a3d"/><text x="135" y="214" text-anchor="middle" font-size="12" font-weight="bold">respond</text><text x="135" y="231" text-anchor="middle" font-size="11">best answer wins</text>
+  <line x1="300" y1="60" x2="150" y2="100" stroke="#333" stroke-width="1.5" marker-end="url(#a5)"/>
+  <line x1="360" y1="60" x2="360" y2="98" stroke="#333" stroke-width="1.5" marker-end="url(#a5)"/>
+  <line x1="420" y1="60" x2="570" y2="100" stroke="#333" stroke-width="1.5" marker-end="url(#a5)"/>
+  <line x1="585" y1="160" x2="585" y2="188" stroke="#333" stroke-width="1.5" marker-end="url(#a5)"/>
+  <line x1="510" y1="220" x2="452" y2="220" stroke="#333" stroke-width="1.5" marker-end="url(#a5)"/>
+  <line x1="270" y1="220" x2="212" y2="220" stroke="#333" stroke-width="1.5" marker-end="url(#a5)"/>
+  <line x1="360" y1="250" x2="585" y2="262" stroke="#333" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#a5)"/>
+  <line x1="390" y1="130" x2="560" y2="215" stroke="#333" stroke-width="1.5" marker-end="url(#a5)"/>
+  <text x="470" y="282" font-size="12">dashed = retry (wider k, max 3 loops), then gave_up = true</text>
+  <text x="60" y="282" font-size="12">calculator: “The result of …” • web: chunks labeled web_search</text>
+  <text x="60" y="300" font-size="12">tool miss or fault → normal retrieval (never an error)</text>
+</svg>
+<figcaption>Fig. 5 — Agent state machine (LangGraph, with a no-dependency manual loop as backup).</figcaption>
+</figure>
+
+<h2 id="s9">9. Feature catalogue</h2>
+<table>
+<tr><th>Phase</th><th>Status</th><th>What it does</th><th>Switch / key files</th></tr>
+<tr><td>1. History + summary</td><td><span class="badge done">DONE</span></td><td>Saves chat turns in MongoDB. Past 20 messages, it stores one summary + last 8 messages.</td><td><code>SUMMARY_THRESHOLD=20</code> · <code>chat_orchestration.py</code></td></tr>
+<tr><td>2. Hybrid retrieval</td><td><span class="badge done">DONE</span></td><td>Adds keyword (BM25) search. Merges with vector search via RRF.</td><td><span class="badge flag">HYBRID_ENABLED=false</span> · <code>retrieval.py</code></td></tr>
+<tr><td>3a. Reranking</td><td><span class="badge done">DONE</span></td><td>Rescores top-10 chunks with a cross-encoder. Keeps top-k. Loads model lazily.</td><td><span class="badge flag">RERANKER_ENABLED=false</span> · <code>reranker.py</code></td></tr>
+<tr><td>3.5–3.9 Docs, uploads, rate limit</td><td><span class="badge done">DONE</span></td><td>User uploads, per-document locks, crash recovery, chat rate limits.</td><td><code>document_service.py</code>, <code>rate_limit_service.py</code></td></tr>
+<tr><td>4. JWT blacklist</td><td><span class="badge done">DONE</span></td><td>Revoked access tokens die in Redis at logout/refresh. Always on.</td><td><code>token_blacklist_service.py</code></td></tr>
+<tr><td>5. Response cache</td><td><span class="badge done">DONE</span></td><td>Same question + same chunks reuses the stored answer. Uploads clear it per user.</td><td><span class="badge flag">CACHE_ENABLED=false</span> · <code>cache_service.py</code></td></tr>
+<tr><td>6. Retries + breaker</td><td><span class="badge done">DONE</span></td><td>Retries only transient faults (timeout, 429, 5xx). Opens a circuit after 5 fails. Always on.</td><td><code>RETRY_MAX_ATTEMPTS=3</code> · <code>utils/retry.py</code></td></tr>
+<tr><td>7. Degraded answers</td><td><span class="badge done">DONE</span></td><td>Dead LLM serves top-3 chunk excerpts with a load banner. Counted in Redis.</td><td><span class="badge flag">DEGRADED_MODE_ENABLED=false</span> · <code>degradation_service.py</code></td></tr>
+<tr><td>8. Token/cost log</td><td><span class="badge done">DONE</span></td><td>Logs prompt/output tokens + USD per request to MongoDB. <code>GET /api/v1/usage</code> shows daily totals.</td><td><code>COST_PER_1K_*</code> · <code>usage_service.py</code></td></tr>
+<tr><td>10. Docker Compose</td><td><span class="badge done">DONE</span></td><td>Backend + frontend + redis + mongo + chroma in containers. Health checks and volumes. Prod override with nginx TLS.</td><td><code>Dockerfile</code>, <code>docker-compose.yml</code>, <code>CHROMA_URL</code> · <code>DOCKER_SETUP.html</code></td></tr>
+<tr><td>11. Agent loop</td><td><span class="badge done">DONE</span></td><td>Routes smalltalk vs research. Retries weak answers (max 3). Best answer wins. Fail-open to plain RAG.</td><td><span class="badge flag">AGENT_ENABLED=false</span> · <code>app/agents/</code>, <code>langgraph==1.2.11</code></td></tr>
+<tr><td>12. Tools</td><td><span class="badge done">DONE</span></td><td>Calculator (safe AST math, no eval). Web search (Tavily/SerpAPI, top 5). Registry is extensible.</td><td><code>SEARCH_BACKEND=none</code> · <code>app/tools/</code></td></tr>
+</table>
+<div class="okbox"><strong>Result shape.</strong> Agent answers look like normal RAG answers, plus <code>agent: {route, attempts, confidence, gave_up, tools_used}</code>. The frontend ignores extra fields.</div>
+
+<h2 id="s10">10. Work that is left</h2>
+<div class="warn"><strong>One phase is NOT done.</strong> Do it fully. It needs tests.</div>
+<table>
+<tr><th>Phase</th><th>Status</th><th>What is missing</th><th>Plan</th></tr>
+<tr><td>9. Pytest migration</td><td><span class="badge left">LEFT</span></td><td>Tests still use <code>unittest</code> (19 files). No <code>conftest.py</code>. No <code>pytest.ini</code>. No coverage gate.</td><td>Add <code>pytest, pytest-asyncio, pytest-cov</code>. Write shared fixtures. Convert all test files. Target 80%+ coverage. Update commands.</td></tr>
+</table>
+
+<h2 id="s11">11. Configuration</h2>
+<p>All behavior uses env vars. Copy <code>.env.example</code> into <code>.env</code>. Never replace secrets. Never print secrets.</p>
+<table>
+<tr><th>Group</th><th>Key vars (defaults)</th></tr>
+<tr><td>Required</td><td><code>JWT_SECRET_KEY</code> (≥32 bytes), <code>JWT_ISSUER</code>, <code>JWT_AUDIENCE</code>, <code>MONGODB_URI</code>, Gemini keys, <code>REDIS_URL</code></td></tr>
+<tr><td>Retrieval</td><td><code>HYBRID_ENABLED=false</code>, <code>RERANKER_ENABLED=false</code>, <code>RERANKER_TOP_K=5</code></td></tr>
+<tr><td>Robustness</td><td><code>CACHE_ENABLED=false</code>, <code>CACHE_TTL_SECONDS=3600</code>, <code>RETRY_MAX_ATTEMPTS=3</code>, <code>DEGRADED_MODE_ENABLED=false</code></td></tr>
+<tr><td>Cost</td><td><code>COST_PER_1K_INPUT=0.0001</code>, <code>COST_PER_1K_OUTPUT=0.0004</code></td></tr>
+<tr><td>Agent + tools</td><td><code>AGENT_ENABLED=false</code>, <code>AGENT_MAX_ITERATIONS=3</code>, <code>AGENT_CONFIDENCE_THRESHOLD=0.5</code>, <code>SEARCH_BACKEND=none</code>, <code>SEARCH_MAX_RESULTS=5</code></td></tr>
+<tr><td>Local dev only</td><td><code>REFRESH_COOKIE_SECURE=false</code> (HTTP). Keep <code>true</code> in production.</td></tr>
+</table>
+
+<h2 id="s12">12. How to start the project</h2>
+<h3>12.1 What you need</h3>
+<ul>
+<li>Python 3.13 (repo uses a local <code>.venv</code>). Node 22+. Redis server 7.2+. MongoDB.</li>
+<li>A <code>.env</code> file with the required keys (see §11).</li>
+</ul>
+<h3>12.2 Backend (PowerShell)</h3>
+<pre><span class="c"># 1. Install deps</span>
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+<span class="c"># 2. Set local env (dev only)</span>
+$env:REDIS_URL='redis://localhost:6379/0'; $env:REFRESH_COOKIE_SECURE='false'
+<span class="c"># 3. Run the API (reload for dev)</span>
+.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+<span class="c"># 4. Run backend tests (no live AI needed)</span>
+$env:LANGSMITH_TRACING='false'; $env:LANGCHAIN_TRACING_V2='false'
+.venv\Scripts\python.exe -m unittest discover -s tests -v</pre>
+<h3>12.3 Frontend (in <code>frontend/</code>)</h3>
+<pre><span class="c"># Dev server (port 5173, proxies /api to :8000)</span>
+npm run dev
+<span class="c"># Unit tests / E2E (Edge channel, own dev server)</span>
+npm test
+npm run test:e2e</pre>
+<h3>12.4 Checks</h3>
+<ul>
+<li>Open <code>http://127.0.0.1:8000/health</code> → <code>{"status":"ok"}</code>.</li>
+<li>Open <code>http://127.0.0.1:8000/ready</code> → ready only with documents loaded.</li>
+<li>Full backend suite today: 403 tests (6 known pre-existing SSE/conversation failures, unrelated to agent/tools).</li>
+</ul>
+<h3>12.5 Docker (Phase 10)</h3>
+<p>One command starts all services: <code>docker compose up -d --build</code>. Frontend serves on :80. Backend serves on :8000. Full guide: <code>DOCKER_SETUP.html</code>.</p>
+
+<h2 id="s13">13. API endpoints</h2>
+<table>
+<tr><th>Method + path</th><th>Job</th></tr>
+<tr><td><code>POST /api/v1/auth/register, /login, /refresh, /logout, /me</code></td><td>Register, login, rotate, logout, identity. 422 bodies stripped; no-store headers.</td></tr>
+<tr><td><code>POST /api/v1/chat</code></td><td>One JSON answer (<code>ChatResponse</code>).</td></tr>
+<tr><td><code>POST /api/v1/chat/sse</code></td><td>Event stream (<code>start → retrieval → token* → sources → done</code>).</td></tr>
+<tr><td><code>POST /api/v1/chat/stream</code></td><td>Plain-text token stream.</td></tr>
+<tr><td><code>GET/POST /api/v1/conversations…</code></td><td>Chat history CRUD.</td></tr>
+<tr><td><code>POST /api/v1/documents…</code></td><td>Uploads, jobs, delete (tenant-scoped).</td></tr>
+<tr><td><code>GET /api/v1/usage?days=7</code></td><td>Own token/cost totals, daily + rolled up.</td></tr>
+</table>
+
+<h2 id="s14">14. Design rules</h2>
+<ol>
+<li>One phase at a time. Finish fully before the next.</li>
+<li>Every phase needs tests. No phase ships with red tests.</li>
+<li>No breaking changes. Old API shapes stay intact.</li>
+<li>All new behavior uses env flags (default off).</li>
+<li>Heavy models load on first use, never at start-up.</li>
+<li>New services fail gracefully. Old paths still work.</li>
+<li>Update docs (<code>AGENTS.md</code>, <code>.env.example</code>) with each phase.</li>
+<li>Never trust a refresh JWT without its Redis row. Never store refresh tokens in localStorage.</li>
+<li>History resolves references only. History is never a fact source.</li>
+</ol>
+</main>
+<footer>Generated from the repo state after Phase 12. Phase 10 (docker) is done — see <code>DOCKER_SETUP.html</code>. Remaining: Phase 9 (pytest).</footer>
+</body>
+</html>

@@ -24,6 +24,8 @@ existing local `.env`; Compose reads it through `env_file`.
 | `UPLOAD_DIR` | `uploads` | writable path | Relative paths resolve under the project root. Unwritable storage makes uploads fail (500) after validation. |
 | `MAX_UPLOAD_BYTES` | `5242880` (5 MiB) | positive int | Oversized files get 413; invalid values use the default. |
 | `REFRESH_COOKIE_SECURE` | `true` | `true` / `false` | `true` requires HTTPS (production). Local HTTP must set `false` explicitly or the browser will not send the refresh cookie. |
+| `CHAT_DAILY_QUOTA` | `200` | ≥1 int (chat turns per user per UTC day) | Invalid or non-positive → 200. Exceeded → 429 with `Retry-After` seconds until the next UTC midnight. Redis outage fails open (logged), like the burst limiter. |
+| `CHAT_QUOTA_EXEMPT_USERS` | `eval_user` | comma-separated user ids | Unset keeps the eval tenant exempt; set-but-empty exempts nobody. Exempt users skip the daily counter, not the burst limits. |
 
 ## Retrieval / generation flags
 
@@ -95,8 +97,10 @@ not in `.env`:
   register 5/300 s, login 10/60 s, refresh 30/60 s, chat 30/60 s,
   upload 10/60 s. Exceeded → 429 with `Retry-After`. Redis outage →
   fail open for chat/upload, fail closed where session trust is involved.
-- Per-user daily chat quota (Wave 1.3): see `CHAT_DAILY_QUOTA` in the
-  section below once enabled.
+- Per-user daily chat quota (Wave 1.3): `CHAT_DAILY_QUOTA` chats per
+  UTC day, counted at `rate_limit:chat_daily:user:<id>:<YYYY-MM-DD>`
+  and expiring at the next UTC midnight. Exceeded → 429 + `Retry-After`.
+  `CHAT_QUOTA_EXEMPT_USERS` (default `eval_user`) skips the daily check.
 
 ## Eval gate (nightly CI only)
 

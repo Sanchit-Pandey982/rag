@@ -5,13 +5,18 @@ Boundary rule: MongoDB writes live here, never inside
 unchanged RAG pipeline, forwards its events/items untouched, accumulates
 the assistant answer, and persists exactly one logical message per turn.
 
-Chat routes are synchronous, while MongoDB access is async. The sync routes
-run in a worker thread without a running event loop, so ``asyncio.run``
-bridges the few small persistence calls without changing the routes' shape.
+Chat routes are async, so every MongoDB call runs on the request loop that
+owns the lifespan ``AsyncMongoClient``. The RAG pipeline itself is still
+synchronous (Chroma + Gemini clients), so it is moved off the loop with
+``asyncio.to_thread``; streams pull one item at a time from the sync
+generator in a worker thread. There is no ``asyncio.run`` in the request
+path, which is what broke persistent conversations when routes ran in a
+worker thread.
 """
 
 import asyncio
 import logging
+import os
 
 from fastapi import HTTPException, Request
 
@@ -29,9 +34,26 @@ from app.services.conversation_service import (
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_USAGE_RECORD_TIMEOUT_SECONDS = 2.0
+_STREAM_END = object()
 
-def _await(coro):
-    return asyncio.run(coro)
+
+def usage_record_timeout_seconds() -> float:
+    """Bound how long a ledger write can delay a completed chat turn.
+
+    Usage metering is observability, not conversation truth. A Mongo
+    spike must not stall an SSE stream (or the JSON response) after the
+    answer is ready, so the fail-open write gets a short deadline.
+    """
+    try:
+        value = float(os.getenv(
+            "USAGE_RECORD_TIMEOUT_SECONDS",
+            str(DEFAULT_USAGE_RECORD_TIMEOUT_SECONDS),
+        ))
+    except ValueError:
+        return DEFAULT_USAGE_RECORD_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_USAGE_RECORD_TIMEOUT_SECONDS
+
 
 
 def default_summarize_fn(messages, previous_summary=None):
@@ -121,7 +143,7 @@ async def build_context_history(
     return recent
 
 
-def prepare_chat(
+async def prepare_chat(
     authorized_payload: ChatRequest,
     service: ConversationService | None,
     summarize_fn=None,
@@ -146,14 +168,14 @@ def prepare_chat(
             detail="Conversation service is unavailable. Please retry.",
         )
     try:
-        history = _await(build_context_history(
+        history = await build_context_history(
             service, conversation_id, authorized_payload.user_id,
             summarize_fn=summarize_fn,
-        ))
-        turn_id = _await(service.start_turn(
+        )
+        turn_id = await service.start_turn(
             conversation_id, authorized_payload.user_id,
             authorized_payload.raw_query,
-        ))
+        )
     except ConversationNotFound as error:
         # Unknown id and another user's id look identical (no existence leak).
         raise HTTPException(status_code=404, detail="Conversation not found.") from error
@@ -168,18 +190,18 @@ def prepare_chat(
     return rag_payload, turn_id
 
 
-def _safe_fail(service, conversation_id, user_id, turn_id, status, partial):
+async def _safe_fail(service, conversation_id, user_id, turn_id, status, partial):
     try:
-        _await(service.fail_turn(
+        await service.fail_turn(
             conversation_id, user_id, turn_id,
             status=status, partial_content=partial,
-        ))
+        )
     except ConversationStoreUnavailable:
         logger.exception("Could not record failed turn")
 
 
-def _safe_record_usage(usage_service, user_id: str, usage: dict | None) -> None:
-    """Persist one request's token ledger row, fail-open.
+async def _safe_record_usage(usage_service, user_id: str, usage: dict | None) -> None:
+    """Persist one request's token ledger row, fail-open and time-bounded.
 
     Usage is observability, not conversation truth: a store outage is
     logged and the (already correct) answer still goes out. Malformed
@@ -189,26 +211,29 @@ def _safe_record_usage(usage_service, user_id: str, usage: dict | None) -> None:
         return
     try:
         model = usage.get("model")
-        _await(usage_service.record_usage(
-            user_id=user_id,
-            prompt_tokens=usage.get("prompt_tokens"),
-            completion_tokens=usage.get("completion_tokens"),
-            total_tokens=usage.get("total_tokens"),
-            model=model if isinstance(model, str) and model else "unknown",
-        ))
+        await asyncio.wait_for(
+            usage_service.record_usage(
+                user_id=user_id,
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=usage.get("completion_tokens"),
+                total_tokens=usage.get("total_tokens"),
+                model=model if isinstance(model, str) and model else "unknown",
+            ),
+            timeout=usage_record_timeout_seconds(),
+        )
     except Exception:
         logger.exception("Could not record token usage")
 
 
-def _safe_complete(service, conversation_id, user_id, turn_id, answer):
-    _await(service.complete_turn(conversation_id, user_id, turn_id, answer))
+async def _safe_complete(service, conversation_id, user_id, turn_id, answer):
+    await service.complete_turn(conversation_id, user_id, turn_id, answer)
 
 
-def run_chat_once(rag_service, service, authorized_payload: ChatRequest,
-                   use_cache: bool | None = None,
-                   use_degraded: bool | None = None,
-                   use_agent: bool | None = None,
-                   usage_service=None) -> dict:
+async def run_chat_once(rag_service, service, authorized_payload: ChatRequest,
+                        use_cache: bool | None = None,
+                        use_degraded: bool | None = None,
+                        use_agent: bool | None = None,
+                        usage_service=None) -> dict:
     """Shared logic for the non-streaming ``POST /chat`` route.
 
     ``use_cache=None`` follows the ``CACHE_ENABLED`` env flag; the
@@ -220,22 +245,28 @@ def run_chat_once(rag_service, service, authorized_payload: ChatRequest,
     LangGraph retrieve → rerank → generate → check_confidence loop
     with bounded retries; disabled callers keep the legacy pipeline.
     ``usage_service=None`` skips token ledger recording.
+
+    The synchronous RAG call runs in a worker thread (``to_thread``);
+    persistence stays on this event loop so the lifespan Mongo client is
+    never shared across loops.
     """
-    rag_payload, turn_id = prepare_chat(authorized_payload, service)
+    rag_payload, turn_id = await prepare_chat(authorized_payload, service)
     try:
-        result = rag_service.run_once(
-            rag_payload, use_cache=use_cache, use_degraded=use_degraded,
-            use_agent=use_agent)
+        result = await asyncio.to_thread(
+            rag_service.run_once, rag_payload,
+            use_cache=use_cache, use_degraded=use_degraded,
+            use_agent=use_agent,
+        )
     except Exception:
         if turn_id is not None:
-            _safe_fail(
+            await _safe_fail(
                 service, authorized_payload.conversation_id,
                 authorized_payload.user_id, turn_id, FAILED, "",
             )
         raise
     if turn_id is not None:
         try:
-            _safe_complete(
+            await _safe_complete(
                 service, authorized_payload.conversation_id,
                 authorized_payload.user_id, turn_id, result["answer"],
             )
@@ -245,13 +276,25 @@ def run_chat_once(rag_service, service, authorized_payload: ChatRequest,
                 status_code=503,
                 detail="Conversation service is unavailable. Please retry.",
             ) from error
-    _safe_record_usage(
+    await _safe_record_usage(
         usage_service, authorized_payload.user_id, result.get("usage"))
     return result
 
 
-def wrap_event_stream(stream, service, authorized_payload, turn_id,
-                      usage_service=None):
+def _next_stream_item(iterator):
+    """Thread-side ``next`` that reports exhaustion without raising.
+
+    ``StopIteration`` must not cross a worker-thread boundary (PEP 479 /
+    future semantics), so exhaustion becomes a sentinel object.
+    """
+    try:
+        return next(iterator)
+    except StopIteration:
+        return _STREAM_END
+
+
+async def wrap_event_stream(stream, service, authorized_payload, turn_id,
+                            usage_service=None):
     """Forward SSE items unchanged while persisting one assistant message.
 
     Tokens are accumulated, never inserted per-token. ``done`` persists the
@@ -260,17 +303,21 @@ def wrap_event_stream(stream, service, authorized_payload, turn_id,
     abnormal end: exception, cancellation, close without ``done``) records a
     failed/cancelled turn that future history loads exclude. No new event
     names are introduced.
+
+    The sync event generator is advanced in a worker thread (one item at a
+    time, preserving backpressure); Mongo awaits stay on the request loop.
     """
     if turn_id is None:
         if usage_service is None:
-            yield from stream
+            async for item in _aiter_sync(stream):
+                yield item
             return
         # Legacy path (no persistence turn) still meters usage: nothing
         # here touches MongoDB history, so a bare forward with ledger
         # recording is the honest shape.
-        for item in stream:
+        async for item in _aiter_sync(stream):
             if item["event"] == "done":
-                _safe_record_usage(
+                await _safe_record_usage(
                     usage_service, authorized_payload.user_id,
                     item["data"].get("metadata", {}).get("usage"),
                 )
@@ -281,13 +328,16 @@ def wrap_event_stream(stream, service, authorized_payload, turn_id,
     parts: list[str] = []
     completed = False
     try:
-        for item in stream:
+        async for item in _aiter_sync(stream):
             event = item["event"]
             if event == "token":
                 parts.append(item["data"].get("text", ""))
             elif event == "done":
                 try:
-                    _safe_complete(service, conversation_id, user_id, turn_id, "".join(parts))
+                    await _safe_complete(
+                        service, conversation_id, user_id, turn_id,
+                        "".join(parts),
+                    )
                 except ConversationStoreUnavailable:
                     logger.exception("Could not save completed turn")
                     yield {
@@ -298,32 +348,41 @@ def wrap_event_stream(stream, service, authorized_payload, turn_id,
                         },
                     }
                     return
-                _safe_record_usage(
+                await _safe_record_usage(
                     usage_service, user_id,
                     item["data"].get("metadata", {}).get("usage"),
                 )
                 completed = True
             elif event == "error":
-                _safe_fail(service, conversation_id, user_id, turn_id, FAILED, "".join(parts))
+                await _safe_fail(
+                    service, conversation_id, user_id, turn_id,
+                    FAILED, "".join(parts),
+                )
             yield item
         if not completed:
             # Exhausted without "done" (and without "error", which returns
             # via the branch above): must not become successful history.
             # RAGSystem always ends with one of them; this guards the shape.
-            _safe_fail(service, conversation_id, user_id, turn_id, FAILED, "".join(parts))
-    except GeneratorExit:
-        _safe_fail(service, conversation_id, user_id, turn_id, CANCELLED, "".join(parts))
-        raise
-    except asyncio.CancelledError:
-        _safe_fail(service, conversation_id, user_id, turn_id, CANCELLED, "".join(parts))
+            await _safe_fail(
+                service, conversation_id, user_id, turn_id,
+                FAILED, "".join(parts),
+            )
+    except (GeneratorExit, asyncio.CancelledError):
+        await _safe_fail(
+            service, conversation_id, user_id, turn_id,
+            CANCELLED, "".join(parts),
+        )
         raise
     except Exception:
-        _safe_fail(service, conversation_id, user_id, turn_id, FAILED, "".join(parts))
+        await _safe_fail(
+            service, conversation_id, user_id, turn_id,
+            FAILED, "".join(parts),
+        )
         raise
 
 
-def wrap_text_stream(stream, service, authorized_payload, turn_id,
-                     usage_service=None, usage=None):
+async def wrap_text_stream(stream, service, authorized_payload, turn_id,
+                           usage_service=None, usage=None):
     """Same turn semantics for ``POST /chat/stream`` (plain-text tokens).
 
     The plain-text transport has no error channel, so a persistence failure
@@ -335,28 +394,61 @@ def wrap_text_stream(stream, service, authorized_payload, turn_id,
     """
     if turn_id is None:
         if usage_service is None or usage is None:
-            yield from stream
+            async for text in _aiter_sync(stream):
+                yield text
             return
-        for text in stream:
+        async for text in _aiter_sync(stream):
             yield text
-        _safe_record_usage(usage_service, authorized_payload.user_id, usage)
+        await _safe_record_usage(usage_service, authorized_payload.user_id, usage)
         return
     conversation_id = authorized_payload.conversation_id
     user_id = authorized_payload.user_id
     parts: list[str] = []
     try:
-        for text in stream:
+        async for text in _aiter_sync(stream):
             parts.append(text)
             yield text
     except (GeneratorExit, asyncio.CancelledError):
-        _safe_fail(service, conversation_id, user_id, turn_id, CANCELLED, "".join(parts))
+        await _safe_fail(
+            service, conversation_id, user_id, turn_id,
+            CANCELLED, "".join(parts),
+        )
         raise
     except Exception:
-        _safe_fail(service, conversation_id, user_id, turn_id, FAILED, "".join(parts))
+        await _safe_fail(
+            service, conversation_id, user_id, turn_id,
+            FAILED, "".join(parts),
+        )
         raise
     else:
         try:
-            _safe_complete(service, conversation_id, user_id, turn_id, "".join(parts))
+            await _safe_complete(
+                service, conversation_id, user_id, turn_id, "".join(parts)
+            )
         except ConversationStoreUnavailable:
             logger.exception("Could not save completed turn")
-        _safe_record_usage(usage_service, user_id, usage)
+        await _safe_record_usage(usage_service, user_id, usage)
+
+
+async def _aiter_sync(sync_iterator):
+    """Iterate a blocking sync generator without blocking the event loop.
+
+    One ``next`` per item keeps natural backpressure: the producer only
+    advances when the consumer asks. Closing the async generator closes
+    the sync one while no worker thread is inside it.
+    """
+    iterator = iter(sync_iterator)
+    try:
+        while True:
+            item = await asyncio.to_thread(_next_stream_item, iterator)
+            if item is _STREAM_END:
+                return
+            yield item
+    finally:
+        close = getattr(iterator, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception:
+                logger.exception("Could not close RAG stream")
+

@@ -229,9 +229,9 @@ class SummarizationTests(unittest.TestCase):
             chat_history=[{"role": "user", "content": "forged"}],
             conversation_id=self.conversation_id,
         )
-        rag_payload, turn_id = orchestration.prepare_chat(
+        rag_payload, turn_id = asyncio.run(orchestration.prepare_chat(
             payload, self.service, summarize_fn=fake_summarize_fn
-        )
+        ))
         self.assertIsNotNone(turn_id)
         roles = [message.role for message in rag_payload.chat_history]
         self.assertEqual(roles[0], "system")

@@ -121,13 +121,105 @@ for (const status of [401, 403]) {
     const getReader = t.mock.method(response.body, "getReader");
     t.mock.method(globalThis, "fetch", async () => response);
     const events = [];
+    const expected = status === 401
+      ? /session expired/
+      : /Chat request failed \(403\)/;
     await assert.rejects(streamChat({
       ...payload, access_token: "test-access-token", onEvent: (event) => events.push(event),
-    }), new RegExp(`Chat request failed \\(${status}\\)`));
+    }), expected);
     assert.equal(getReader.mock.callCount(), 0);
     assert.deepEqual(events, []);
   });
 }
+
+test("refreshes once before a 401 stream and replays it with the new token", async (t) => {
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    calls.push(options.headers.Authorization);
+    if (calls.length === 1) return new Response(null, { status: 401 });
+    return new Response(new TextEncoder().encode(encode("done", {})), {
+      headers: { "content-type": "text/event-stream" },
+    });
+  });
+  const refresh = t.mock.fn(async () => "fresh-token");
+  const events = [];
+  await streamChat({
+    ...payload,
+    access_token: "stale-token",
+    refreshAccessToken: refresh,
+    onEvent: (event) => events.push(event),
+  });
+  assert.equal(refresh.mock.callCount(), 1);
+  assert.deepEqual(calls, ["Bearer stale-token", "Bearer fresh-token"]);
+  assert.deepEqual(events.map(({ event }) => event), ["done"]);
+});
+
+test("never replays a stream after a second 401", async (t) => {
+  const calls = [];
+  const refresh = t.mock.fn(async () => "fresh-token");
+  t.mock.method(globalThis, "fetch", async () => {
+    calls.push("attempt");
+    return new Response(null, { status: 401 });
+  });
+  let expired = 0;
+  await assert.rejects(streamChat({
+    ...payload,
+    access_token: "stale-token",
+    refreshAccessToken: refresh,
+    onAuthExpired: () => { expired += 1; },
+    onEvent() {},
+  }), /session expired/);
+  assert.equal(calls.length, 2, "one original request plus exactly one replay");
+  assert.equal(refresh.mock.callCount(), 1);
+  assert.equal(expired, 1);
+});
+
+test("never refreshes on 403", async (t) => {
+  const refresh = t.mock.fn(async () => "fresh-token");
+  t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 403 }));
+  await assert.rejects(streamChat({
+    ...payload,
+    access_token: "stale-token",
+    refreshAccessToken: refresh,
+    onEvent() {},
+  }), /Chat request failed \(403\)/);
+  assert.equal(refresh.mock.callCount(), 0, "403 is an authorization failure, not expiry");
+});
+
+test("a failed refresh surfaces the auth error without replaying the stream", async (t) => {
+  let requests = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    requests += 1;
+    return new Response(null, { status: 401 });
+  });
+  const refresh = t.mock.fn(async () => {
+    const error = new Error("Your session expired. Please sign in again.");
+    error.code = "auth-expired";
+    throw error;
+  });
+  await assert.rejects(streamChat({
+    ...payload,
+    access_token: "stale-token",
+    refreshAccessToken: refresh,
+    onEvent() {},
+  }), /session expired/);
+  assert.equal(requests, 1);
+  assert.equal(refresh.mock.callCount(), 1);
+});
+
+test("includes conversation_id only when a persistent turn is requested", async (t) => {
+  const bodies = [];
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    bodies.push(JSON.parse(options.body));
+    return new Response(new TextEncoder().encode(encode("done", {})), {
+      headers: { "content-type": "text/event-stream" },
+    });
+  });
+  await streamChat({ ...payload, conversation_id: "conv-1", onEvent() {} });
+  await streamChat({ ...payload, onEvent() {} });
+  assert.equal(bodies[0].conversation_id, "conv-1");
+  assert.equal("conversation_id" in bodies[1], false);
+});
 
 test("rejects malformed JSON and invalid token payload", async (t) => {
   mockStream(t, "event: token\ndata: nope\n\n");

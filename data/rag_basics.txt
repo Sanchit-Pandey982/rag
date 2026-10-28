@@ -1,0 +1,55 @@
+Retrieval-Augmented Generation (RAG) - Dummy Reference Document
+
+1. What is RAG?
+Retrieval-Augmented Generation (RAG) is an architecture that combines an
+information retrieval system with a large language model (LLM). Instead of
+relying only on what the model learned during training, RAG first retrieves
+relevant documents or text chunks from an external knowledge base and then
+passes them to the LLM as grounding context for generating the answer.
+
+2. Why RAG is used
+- Reduces hallucinations by grounding answers in real documents.
+- Lets an application answer questions about private or fresh data without
+  retraining or fine-tuning the model.
+- Provides source attribution: answers can cite which chunks they came from.
+- Cheaper and faster to update than fine-tuning: add or remove documents and
+  the knowledge base changes immediately.
+
+3. Core pipeline stages
+a) Ingestion: source documents (.txt, .pdf, etc.) are loaded and split into
+   chunks. A common chunk size is around 512 characters with a 64-character
+   overlap so that sentences cut at a boundary are still recoverable.
+b) Embedding: each chunk is converted into a numeric vector using an
+   embedding model such as Gemini embeddings. Similar text produces similar
+   vectors.
+c) Storage: vectors are stored in a vector database such as Chroma, along
+   with metadata (for example the owning user id and document id).
+d) Retrieval: at query time the user's question is embedded and the store
+   returns the nearest chunks by cosine distance. A distance threshold keeps
+   irrelevant chunks out.
+e) Generation: the retrieved chunks are placed in the prompt as context, and
+   the LLM answers using them. If nothing relevant is found, the system must
+   say it does not have enough information instead of guessing.
+
+4. Key concepts
+- Cosine similarity/distance: measures how close two vectors point in the
+  same direction; low distance means highly similar.
+- Top-k retrieval: fetch the k nearest chunks (typically k between 1 and 10).
+- Multi-tenant isolation: every retrieval is filtered by the owner so one
+  user can never read another user's documents.
+- Hybrid search: combines dense vector retrieval with a sparse lexical
+  method such as BM25, fusing the result lists (for example with Reciprocal
+  Rank Fusion) to catch both meaning matches and exact keyword matches.
+- Reranking: a cross-encoder model rescores the candidate chunks jointly
+  with the query for better ordering than embeddings alone.
+- Response caching: identical user+question+chunk combinations can be served
+  from a cache to avoid another LLM call.
+- Unanswerable queries: when retrieval finds nothing relevant above the
+  distance threshold, the correct behaviour is an explicit refusal such as
+  "I do not have enough information to answer that."
+
+5. Evaluation
+RAG systems are evaluated on retrieval quality (did the right chunks come
+back?) and answer quality (is the answer faithful to the chunks?). Tracing
+and evaluation tools such as LangSmith can record each step of retrieval and
+generation so failures can be diagnosed.

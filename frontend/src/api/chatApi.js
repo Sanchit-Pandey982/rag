@@ -2,20 +2,50 @@ const CHAT_SSE_URL = "/api/v1/chat/sse";
 
 // Existing public request interface; protocol decoding stays at the browser boundary.
 export async function streamChat({
-  raw_query, user_id, chat_history, k, rewrite_query, distance_threshold, access_token, onEvent, signal,
+  raw_query, user_id, chat_history, k, rewrite_query, distance_threshold, conversation_id,
+  access_token, refreshAccessToken, onAuthExpired, onEvent, signal,
 }) {
-  const response = await fetch(CHAT_SSE_URL, {
+  const send = (token) => fetch(CHAT_SSE_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
-      ...(access_token ? { Authorization: `Bearer ${access_token}` } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ raw_query, user_id, chat_history, k, rewrite_query, distance_threshold }),
+    body: JSON.stringify({
+      raw_query, user_id, chat_history, k, rewrite_query, distance_threshold,
+      ...(conversation_id ? { conversation_id } : {}),
+    }),
     signal,
   });
 
+  let response = await send(access_token);
+  // At most one refresh, and only before a stream starts: a 401 has no
+  // body, so no partial answer can have been shown or replayed. 403 is an
+  // authorization failure, never an expired session.
+  if (response.status === 401 && refreshAccessToken) {
+    let nextToken;
+    try {
+      nextToken = await refreshAccessToken();
+    } catch (error) {
+      error.code = error.code || "auth-expired";
+      throw error;
+    }
+    if (!nextToken) {
+      const error = new Error("Your session expired. Please sign in again.");
+      error.code = "auth-expired";
+      throw error;
+    }
+    response = await send(nextToken);
+  }
+
   if (!response.ok) {
+    if (response.status === 401) {
+      onAuthExpired?.();
+      const error = new Error("Your session expired. Please sign in again.");
+      error.code = "auth-expired";
+      throw error;
+    }
     let detail = "";
     // Validation messages are useful, but server exceptions stay on the backend.
     if (response.status === 422) {

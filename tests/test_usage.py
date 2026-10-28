@@ -481,6 +481,12 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
 
 
+def collect(async_iterable):
+    async def gather():
+        return [item async for item in async_iterable]
+    return asyncio.run(gather())
+
+
 class OrchestrationTests(unittest.TestCase):
     def test_run_chat_once_records_usage(self):
         usage = {"prompt_tokens": 10, "completion_tokens": 5,
@@ -490,9 +496,9 @@ class OrchestrationTests(unittest.TestCase):
             return_value={"answer": "hi", "usage": usage})
         usage_service = Mock()
         usage_service.record_usage = AsyncMock(return_value={})
-        result = orchestration.run_chat_once(
+        result = asyncio.run(orchestration.run_chat_once(
             fake_rag, None, ChatRequest(raw_query="q", user_id="alice"),
-            usage_service=usage_service)
+            usage_service=usage_service))
         self.assertEqual(result["answer"], "hi")
         usage_service.record_usage.assert_called_once()
         _, kwargs = usage_service.record_usage.call_args
@@ -507,9 +513,9 @@ class OrchestrationTests(unittest.TestCase):
         fake_rag.run_once = Mock(return_value={"answer": "hi"})
         usage_service = Mock()
         usage_service.record_usage = AsyncMock()
-        orchestration.run_chat_once(
+        asyncio.run(orchestration.run_chat_once(
             fake_rag, None, ChatRequest(raw_query="q", user_id="alice"),
-            usage_service=usage_service)
+            usage_service=usage_service))
         usage_service.record_usage.assert_not_called()
 
     def test_run_chat_once_fail_open_on_store_outage(self):
@@ -524,10 +530,10 @@ class OrchestrationTests(unittest.TestCase):
             side_effect=RuntimeError("mongo down"))
         with self.assertLogs("app.services.chat_orchestration",
                              level="ERROR") as logs:
-            result = orchestration.run_chat_once(
+            result = asyncio.run(orchestration.run_chat_once(
                 fake_rag, None,
                 ChatRequest(raw_query="q", user_id="alice"),
-                usage_service=usage_service)
+                usage_service=usage_service))
         # The outage is logged, but the answer still goes out: only the
         # ledger write was lost.
         self.assertEqual(result["answer"], "hi")
@@ -543,7 +549,7 @@ class OrchestrationTests(unittest.TestCase):
         usage_service = Mock()
         usage_service.record_usage = AsyncMock(return_value={})
         payload = ChatRequest(raw_query="q", user_id="alice")
-        forwarded = list(orchestration.wrap_event_stream(
+        forwarded = collect(orchestration.wrap_event_stream(
             iter(events), None, payload, None,
             usage_service=usage_service))
         self.assertEqual(forwarded, events)
@@ -554,7 +560,7 @@ class OrchestrationTests(unittest.TestCase):
         usage_service = Mock()
         usage_service.record_usage = AsyncMock()
         payload = ChatRequest(raw_query="q", user_id="alice")
-        list(orchestration.wrap_event_stream(
+        collect(orchestration.wrap_event_stream(
             iter(events), None, payload, None,
             usage_service=usage_service))
         usage_service.record_usage.assert_not_called()
@@ -565,7 +571,7 @@ class OrchestrationTests(unittest.TestCase):
         payload = ChatRequest(raw_query="q", user_id="alice")
         usage = {"prompt_tokens": 9, "completion_tokens": 9,
                  "total_tokens": 18, "model": "m"}
-        out = list(orchestration.wrap_text_stream(
+        out = collect(orchestration.wrap_text_stream(
             iter(["a", "b"]), None, payload, None,
             usage_service=usage_service, usage=usage))
         self.assertEqual(out, ["a", "b"])

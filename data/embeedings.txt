@@ -1,0 +1,9 @@
+Embeddings - Dummy Reference Document
+
+An embedding is a numeric vector representation of text produced by an
+embedding model such as Gemini embeddings. Text with similar meaning maps to
+nearby points in vector space, measured with cosine similarity. In a RAG
+system, both document chunks and user queries are embedded, and retrieval
+finds the chunks whose vectors are closest to the query vector. The system
+in this project uses cosine distance with a threshold (0 to 2) so that only
+semantically relevant chunks reach the answer model.

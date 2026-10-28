@@ -378,8 +378,8 @@ class RAGServiceCacheTests(unittest.TestCase):
         fake_service = Mock()
         fake_service.run_once = Mock(return_value={"answer": "ok"})
         payload = ChatRequest(raw_query="q", user_id="u")
-        orchestration.run_chat_once(
-            fake_service, None, payload, use_cache=True)
+        asyncio.run(orchestration.run_chat_once(
+            fake_service, None, payload, use_cache=True))
         fake_service.run_once.assert_called_once()
         _, kwargs = fake_service.run_once.call_args
         self.assertTrue(kwargs["use_cache"])

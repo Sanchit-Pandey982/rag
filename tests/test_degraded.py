@@ -361,9 +361,9 @@ class ThreadingTests(unittest.TestCase):
         from app.schemas.chat import ChatRequest
         fake_service = Mock()
         fake_service.run_once = Mock(return_value={"answer": "ok"})
-        orchestration.run_chat_once(
+        asyncio.run(orchestration.run_chat_once(
             fake_service, None, ChatRequest(raw_query="q", user_id="u"),
-            use_degraded=True)
+            use_degraded=True))
         _, kwargs = fake_service.run_once.call_args
         self.assertTrue(kwargs["use_degraded"])
 

@@ -64,14 +64,12 @@ class Document:
     text: str
     title: str
 
-
 @dataclass
 class RetrievedChunk:
     chunk_id: str
     text: str
     distance: float
     metadata: dict
-
 
 @dataclass
 class EvalCase:

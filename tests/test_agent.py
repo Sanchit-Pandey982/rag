@@ -8,6 +8,7 @@ integration in RAGService.run_once, and legacy byte-identity when
 the agent is disabled.
 """
 
+import asyncio
 import os
 import unittest
 from unittest.mock import patch
@@ -410,8 +411,8 @@ class IntegrationTest(unittest.TestCase):
 
         payload = self._request()
         with agent_env():
-            result = orchestration.run_chat_once(
-                SpyService(), None, payload, use_agent=True)
+            result = asyncio.run(orchestration.run_chat_once(
+                SpyService(), None, payload, use_agent=True))
         self.assertEqual(result["answer"], "ok")
         self.assertTrue(seen["use_agent"])
 

@@ -13,26 +13,27 @@ from app.services import chat_orchestration as orchestration
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
 
-def prepare_sse_chat(
+async def prepare_sse_chat(
     authorized_payload: Annotated[ChatRequest, Depends(authorize_chat_request)],
     request: Request,
     _: Annotated[None, Depends(enforce_chat_rate_limit)] = None,
 ) -> tuple[ChatRequest, ChatRequest, str | None]:
     """Resolve conversation history before SSE headers are sent.
 
-    FastAPI 0.141 invokes SSE endpoints in the event loop. Keeping this
-    synchronous work in a sync dependency makes FastAPI run it in the
-    threadpool, so the existing ``asyncio.run`` bridge is safe and an
-    unknown conversation still returns a 404 instead of a broken stream.
+    This runs as an async dependency on the request loop, so the lifespan
+    ``AsyncMongoClient`` is used from its owning loop and an unknown or
+    foreign conversation still returns a 404 instead of a broken stream.
     """
 
     service = orchestration.conversation_service_of(request)
-    rag_payload, turn_id = orchestration.prepare_chat(authorized_payload, service)
+    rag_payload, turn_id = await orchestration.prepare_chat(
+        authorized_payload, service
+    )
     return authorized_payload, rag_payload, turn_id
 
 
 @router.post("/chat", response_model=ChatResponse)
-def chat(
+async def chat(
     authorized_payload: Annotated[ChatRequest, Depends(authorize_chat_request)],
     request: Request,
     _: Annotated[None, Depends(enforce_chat_rate_limit)] = None,
@@ -41,7 +42,7 @@ def chat(
     service = orchestration.conversation_service_of(request)
     usage_service = orchestration.usage_service_of(request)
 
-    result = orchestration.run_chat_once(
+    result = await orchestration.run_chat_once(
         rag_service, service, authorized_payload,
         usage_service=usage_service,
     )
@@ -49,7 +50,7 @@ def chat(
 
 
 @router.post("/chat/stream", response_class=StreamingResponse)
-def chat_stream(
+async def chat_stream(
     authorized_payload: Annotated[ChatRequest, Depends(authorize_chat_request)],
     request: Request,
     _: Annotated[None, Depends(enforce_chat_rate_limit)] = None,
@@ -58,7 +59,9 @@ def chat_stream(
     service = orchestration.conversation_service_of(request)
     usage_service = orchestration.usage_service_of(request)
 
-    rag_payload, turn_id = orchestration.prepare_chat(authorized_payload, service)
+    rag_payload, turn_id = await orchestration.prepare_chat(
+        authorized_payload, service
+    )
     # Caller-owned usage collector: the pipeline fills it while the
     # response streams, and the wrapper below records it on completion.
     usage: dict = {}
@@ -71,7 +74,7 @@ def chat_stream(
 
 
 @router.post("/chat/sse", response_class=EventSourceResponse)
-def chat_sse(
+async def chat_sse(
     prepared: Annotated[
         tuple[ChatRequest, ChatRequest, str | None],
         Depends(prepare_sse_chat),
@@ -91,5 +94,5 @@ def chat_sse(
 
     # FastAPI 0.141's EventSourceResponse is a marker response class: yield
     # ServerSentEvent items instead of returning an EventSourceResponse.
-    for item in wrapped:
+    async for item in wrapped:
         yield ServerSentEvent(event=item["event"], data=item["data"])

@@ -1,0 +1,10 @@
+Vector Databases - Dummy Reference Document
+
+A vector database stores embedding vectors together with metadata and
+supports nearest-neighbour search. Chroma is the vector database used by
+this project: documents are chunked, embedded, and stored in a collection,
+and every retrieval is filtered by the owning user (multi-tenant isolation)
+so one user can never see another user's documents. Chunk ids follow the
+pattern user_id:document_id:index. Chroma can run embedded (PersistentClient
+writing to a local directory) or as an HTTP service (HttpClient pointed at a
+CHROMA_URL), which is how it runs in Docker.

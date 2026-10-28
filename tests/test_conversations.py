@@ -7,6 +7,7 @@ semantics, failure/cancellation exclusion, isolation, and history bounds.
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import unittest
 from types import SimpleNamespace
@@ -94,6 +95,12 @@ class FakeCollection:
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def collect(async_iterable):
+    async def gather():
+        return [item async for item in async_iterable]
+    return run(gather())
 
 
 def user_response(user_id):
@@ -342,7 +349,9 @@ class ConversationPhaseTests(unittest.TestCase):
             ]),
             self.service, payload, turn_id,
         )
-        self.assertEqual([item["event"] for item in stream], ["start", "token"])
+        self.assertEqual(
+            [item["event"] for item in collect(stream)], ["start", "token"]
+        )
         self.assertEqual(
             run(self.service.load_chat_history(conversation_id, "alice")), []
         )
@@ -357,8 +366,13 @@ class ConversationPhaseTests(unittest.TestCase):
         stream = orchestration.wrap_event_stream(
             iter(sse_events()), self.service, payload, turn_id,
         )
-        self.assertEqual(next(stream)["event"], "start")
-        stream.close()  # browser disconnect mid-answer
+
+        async def start_then_close():
+            first = await anext(stream)
+            await stream.aclose()  # browser disconnect mid-answer
+            return first
+
+        self.assertEqual(run(start_then_close())["event"], "start")
         statuses = {d["status"] for d in self.messages.documents}
         self.assertIn(CANCELLED, statuses)
         self.assertNotIn(COMPLETED, statuses)
@@ -366,6 +380,75 @@ class ConversationPhaseTests(unittest.TestCase):
         self.assertEqual(
             run(self.service.load_chat_history(conversation_id, "alice")), []
         )
+
+    # -- event-loop affinity (Wave 1.2 regression) -------------------
+
+    def test_persistent_chat_uses_the_lifespan_event_loop(self):
+        """Mongo calls must run on the lifespan loop, not a nested loop."""
+        service_loops = []
+
+        class LoopBoundService:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __getattr__(self, name):
+                value = getattr(self._inner, name)
+                if asyncio.iscoroutinefunction(value):
+                    async def call(*args, **kwargs):
+                        service_loops.append((name, asyncio.get_running_loop()))
+                        return await value(*args, **kwargs)
+                    return call
+                return value
+
+        @asynccontextmanager
+        async def lifespan(app):
+            yield
+            # Captured after startup so the loop is the one TestClient owns.
+            service_loops.append(("lifespan", asyncio.get_running_loop()))
+
+        app = FastAPI(lifespan=lifespan)
+        app.include_router(chat_router)
+        app.include_router(conversations_router)
+        app.state.rag_service = self.rag_service
+        app.state.conversation_service = LoopBoundService(self.service)
+
+        async def fake_current_user():
+            return user_response("alice")
+
+        app.dependency_overrides[get_current_user] = fake_current_user
+
+        with TestClient(app) as client:
+            conversation_id = client.post(
+                "/api/v1/conversations", json={}
+            ).json()["conversation_id"]
+            response = client.post("/api/v1/chat", json={
+                "raw_query": "persisted question", "user_id": "alice",
+                "chat_history": [], "conversation_id": conversation_id,
+            })
+
+        self.assertEqual(response.status_code, 200)
+        lifespan_loop = next(
+            loop for name, loop in service_loops if name == "lifespan"
+        )
+        lifecycle_calls = [
+            (name, loop) for name, loop in service_loops
+            if name != "lifespan"
+        ]
+        self.assertTrue(lifecycle_calls)
+        self.assertTrue(
+            all(loop is lifespan_loop for _, loop in lifecycle_calls),
+            msg=f"calls escaped the lifespan loop: {lifecycle_calls}",
+        )
+
+    def test_sse_unknown_conversation_is_a_pre_stream_404(self):
+        client = self.client_as("alice")
+        response = client.post("/api/v1/chat/sse", json={
+            "raw_query": "q", "user_id": "alice", "chat_history": [],
+            "conversation_id": "00000000-0000-0000-0000-000000000000",
+        })
+        self.assertEqual(response.status_code, 404)
+        self.assertNotIn("event:", response.text)
+        self.rag_service.run_once_event_stream.assert_not_called()
 
     # -- isolation & bounds ------------------------------------------
 

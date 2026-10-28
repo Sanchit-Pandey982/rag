@@ -9,13 +9,14 @@ ordering on login, and fail-open on Redis outage.
 """
 
 import asyncio
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from secrets import token_urlsafe
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -31,7 +32,9 @@ from app.security.cookies import RefreshCookieSettings
 from app.security.jwt import JWTService
 from app.services.document_service import DocumentLocks, DocumentService
 from app.services.rate_limit_service import (
+    DEFAULT_CHAT_DAILY_QUOTA,
     SCOPE_CHAT,
+    SCOPE_CHAT_DAILY,
     SCOPE_LOGIN,
     SCOPE_REFRESH,
     SCOPE_REGISTER,
@@ -39,16 +42,26 @@ from app.services.rate_limit_service import (
     RateLimitExceeded,
     RateLimitService,
     RateLimitUnavailable,
+    get_chat_daily_quota,
+    get_chat_quota_exempt_users,
+    seconds_until_utc_midnight,
 )
 
 
 class FakeRedis:
-    """Fixed-window counter with controllable time (milliseconds)."""
+    """Fixed-window + daily-quota counter with controllable time.
+
+    The fixed-window script uses milliseconds (PEXPIRE/PTTL); the daily
+    quota script uses seconds (EXPIRE/TTL). ``advance`` moves both clocks.
+    """
 
     def __init__(self):
         self.counts = {}
         self.deadlines = {}
+        self.daily_counts = {}
+        self.daily_deadlines = {}
         self.now_ms = 0
+        self.now_seconds = 0
         self.eval_calls = []
 
     def _expired(self, key):
@@ -59,17 +72,40 @@ class FakeRedis:
             self.counts[key] = 0
             self.deadlines.pop(key, None)
 
+    def _daily_expired(self, key):
+        return (
+            key in self.daily_deadlines
+            and self.now_seconds >= self.daily_deadlines[key]
+        )
+
+    def _reap_daily(self, key):
+        if key not in self.daily_counts or self._daily_expired(key):
+            self.daily_counts[key] = 0
+            self.daily_deadlines.pop(key, None)
+
     async def eval(self, script, numkeys, *args):
-        key, window_ms = args[0], args[1]
-        self.eval_calls.append((script, key, window_ms))
-        self._reap(key)
-        self.counts[key] += 1
-        if self.counts[key] == 1:
-            self.deadlines[key] = self.now_ms + window_ms
-        return [self.counts[key], self.deadlines[key] - self.now_ms]
+        key = args[0]
+        self.eval_calls.append((script, key, args[1] if len(args) > 1 else None))
+        if "PEXPIRE" in script:
+            window_ms = args[1]
+            self._reap(key)
+            self.counts[key] += 1
+            if self.counts[key] == 1:
+                self.deadlines[key] = self.now_ms + window_ms
+            return [self.counts[key], self.deadlines[key] - self.now_ms]
+        ttl_seconds = args[1]
+        self._reap_daily(key)
+        self.daily_counts[key] += 1
+        if self.daily_counts[key] == 1:
+            self.daily_deadlines[key] = self.now_seconds + ttl_seconds
+        return [
+            self.daily_counts[key],
+            self.daily_deadlines[key] - self.now_seconds,
+        ]
 
     def advance(self, ms):
         self.now_ms += ms
+        self.now_seconds += ms / 1000
 
 
 class FailingRedis(FakeRedis):
@@ -165,14 +201,112 @@ class RateLimitServiceTests(unittest.TestCase):
             service(FakeRedis(), **{"nope": (1, 60)})
         with self.assertRaises(ValueError):
             service(FakeRedis(), **{SCOPE_CHAT: (0, 60)})
+        with self.assertRaises(ValueError):
+            RateLimitService(FakeRedis(), daily_quota=0)
+
+    # -- daily quota -------------------------------------------------
+
+    def test_daily_quota_allows_limit_then_raises_until_midnight(self):
+        redis = FakeRedis()
+        limiter = RateLimitService(redis, daily_quota=2)
+        run(limiter.check_daily_quota(user_id="alice"))
+        run(limiter.check_daily_quota(user_id="alice"))
+        with self.assertRaises(RateLimitExceeded) as raised:
+            run(limiter.check_daily_quota(user_id="alice"))
+        retry_after = raised.exception.retry_after_seconds
+        self.assertGreaterEqual(retry_after, 1)
+        self.assertLessEqual(retry_after, 24 * 60 * 60)
+        keys = [call[1] for call in redis.eval_calls]
+        self.assertTrue(
+            all(key.startswith("rate_limit:chat_daily:user:alice:") for key in keys)
+        )
+
+    def test_daily_quota_resets_after_expiry(self):
+        redis = FakeRedis()
+        limiter = RateLimitService(redis, daily_quota=1)
+        run(limiter.check_daily_quota(user_id="alice"))
+        with self.assertRaises(RateLimitExceeded):
+            run(limiter.check_daily_quota(user_id="alice"))
+        redis.advance(24 * 60 * 60 * 1000)
+        run(limiter.check_daily_quota(user_id="alice"))
+
+    def test_daily_quota_skips_exempt_tenant(self):
+        redis = FakeRedis()
+        limiter = RateLimitService(
+            redis, daily_quota=1, quota_exempt_users={"eval_user"}
+        )
+        for _ in range(3):
+            run(limiter.check_daily_quota(user_id="eval_user"))
+        self.assertEqual(redis.eval_calls, [])
+        run(limiter.check_daily_quota(user_id="alice"))
+        with self.assertRaises(RateLimitExceeded):
+            run(limiter.check_daily_quota(user_id="alice"))
+
+    def test_daily_quota_buckets_isolate_users(self):
+        redis = FakeRedis()
+        limiter = RateLimitService(redis, daily_quota=1)
+        run(limiter.check_daily_quota(user_id="alice"))
+        run(limiter.check_daily_quota(user_id="bob"))
+        with self.assertRaises(RateLimitExceeded):
+            run(limiter.check_daily_quota(user_id="alice"))
+        self.assertEqual(limiter.bucket(
+            SCOPE_CHAT_DAILY, "user:bob:2026-01-01"
+        ), "rate_limit:chat_daily:user:bob:2026-01-01")
+
+    def test_daily_quota_redis_errors_become_unavailable(self):
+        limiter = RateLimitService(FailingRedis(), daily_quota=1)
+        with self.assertRaises(RateLimitUnavailable):
+            run(limiter.check_daily_quota(user_id="alice"))
+
+
+class ChatQuotaConfigTests(unittest.TestCase):
+    def test_daily_quota_env_defaults_and_fallbacks(self):
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("CHAT_DAILY_QUOTA", None)
+            self.assertEqual(get_chat_daily_quota(), DEFAULT_CHAT_DAILY_QUOTA)
+        with patch.dict("os.environ", {"CHAT_DAILY_QUOTA": "25"}):
+            self.assertEqual(get_chat_daily_quota(), 25)
+        for invalid in ("0", "-3", "lots"):
+            with patch.dict("os.environ", {"CHAT_DAILY_QUOTA": invalid}):
+                self.assertEqual(
+                    get_chat_daily_quota(), DEFAULT_CHAT_DAILY_QUOTA
+                )
+
+    def test_exempt_users_default_and_empty_override(self):
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("CHAT_QUOTA_EXEMPT_USERS", None)
+            self.assertEqual(
+                get_chat_quota_exempt_users(), frozenset({"eval_user"})
+            )
+        with patch.dict(
+            "os.environ", {"CHAT_QUOTA_EXEMPT_USERS": "eval_user, admin"}
+        ):
+            self.assertEqual(
+                get_chat_quota_exempt_users(),
+                frozenset({"eval_user", "admin"}),
+            )
+        with patch.dict("os.environ", {"CHAT_QUOTA_EXEMPT_USERS": ""}):
+            self.assertEqual(get_chat_quota_exempt_users(), frozenset())
+
+    def test_midnight_ttl_is_positive_and_within_a_day(self):
+        ttl = seconds_until_utc_midnight()
+        self.assertGreaterEqual(ttl, 1)
+        self.assertLessEqual(ttl, 24 * 60 * 60)
 
 
 class RateLimitRouteTests(unittest.TestCase):
     def setUp(self):
         self.redis = FakeRedis()
 
-    def limiter(self, scope, limit=2, window=60):
-        return RateLimitService(self.redis, limits={scope: (limit, window)})
+    def limiter(
+        self, scope, limit=2, window=60, daily_quota=None, exempt=None
+    ):
+        return RateLimitService(
+            self.redis,
+            limits={scope: (limit, window)},
+            daily_quota=daily_quota,
+            quota_exempt_users=exempt,
+        )
 
     def retry_after(self, response):
         self.assertEqual(response.status_code, 429)
@@ -263,7 +397,9 @@ class RateLimitRouteTests(unittest.TestCase):
 
     # -- chat --------------------------------------------------------
 
-    def chat_client(self, user_id="alice"):
+    def chat_client(
+        self, user_id="alice", *, burst_limit=2, daily_quota=None, exempt=None
+    ):
         app = FastAPI()
         app.include_router(chat_router)
         rag_service = Mock()
@@ -272,7 +408,12 @@ class RateLimitRouteTests(unittest.TestCase):
             "retrieved_document_ids": [], "chunks": [],
         }
         app.state.rag_service = rag_service
-        app.state.rate_limit_service = self.limiter(SCOPE_CHAT)
+        app.state.rate_limit_service = self.limiter(
+            SCOPE_CHAT,
+            limit=burst_limit,
+            daily_quota=daily_quota,
+            exempt=exempt,
+        )
 
         async def fake_current_user():
             return user_response(user_id)
@@ -311,6 +452,44 @@ class RateLimitRouteTests(unittest.TestCase):
         self.assertEqual(
             bob.post("/api/v1/chat", json=self.chat_payload("bob")).status_code, 200
         )
+
+    def test_daily_quota_throttles_one_user_without_affecting_another(self):
+        alice, _ = self.chat_client(
+            "alice", burst_limit=100, daily_quota=1
+        )
+        bob, _ = self.chat_client("bob", burst_limit=100, daily_quota=1)
+        self.assertEqual(
+            alice.post("/api/v1/chat", json=self.chat_payload("alice")).status_code,
+            200,
+        )
+        response = alice.post(
+            "/api/v1/chat", json=self.chat_payload("alice")
+        )
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("Daily chat quota", response.json()["detail"])
+        self.assertGreaterEqual(int(response.headers["retry-after"]), 1)
+        self.assertLessEqual(
+            int(response.headers["retry-after"]), 24 * 60 * 60
+        )
+        self.assertEqual(
+            bob.post("/api/v1/chat", json=self.chat_payload("bob")).status_code,
+            200,
+        )
+
+    def test_daily_quota_exempts_eval_tenant_at_the_route(self):
+        client, _ = self.chat_client(
+            "eval_user",
+            burst_limit=100,
+            daily_quota=1,
+            exempt={"eval_user"},
+        )
+        for _ in range(3):
+            self.assertEqual(
+                client.post(
+                    "/api/v1/chat", json=self.chat_payload("eval_user")
+                ).status_code,
+                200,
+            )
 
     # -- upload ------------------------------------------------------
 

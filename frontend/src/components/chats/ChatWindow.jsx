@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, BookOpen, Check, ChevronRight, Copy, FileText, Layers3, RotateCcw, Search, Square, Workflow } from "lucide-react";
+import { ArrowDown, ArrowUp, BookOpen, Check, ChevronRight, Copy, FileText, Layers3, LoaderCircle, RotateCcw, Search, Square, Workflow } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import { apiRequest } from "../../api/authApi.js";
 import { streamChat } from "../../api/chatApi.js";
 import { buildChatHistory } from "../../history.js";
 
@@ -65,13 +66,17 @@ function Message({ message, onRetry, isStreaming }) {
 
 export default function ChatWindow({
   user_id, access_token, chat_history = [], k = 3, rewrite_query = false, distance_threshold = null,
-  active = true, onTitle, onBusyChange,
+  conversation_id = null, hydrate = false, onEnsureConversation, onTitle, onBusyChange,
+  refreshAccessToken, onAuthExpired,
+  active = true,
 }) {
   const [messages, setMessages] = useState([]);
   const queryId = useId();
   const [raw_query, setRawQuery] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamStatus, setStreamStatus] = useState(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
   const [showJump, setShowJump] = useState(false);
   const abortControllerRef = useRef(null);
   const scrollRef = useRef(null);
@@ -80,6 +85,32 @@ export default function ChatWindow({
   const previousUserRef = useRef(user_id);
 
   useEffect(() => () => abortControllerRef.current?.abort(), []);
+  useEffect(() => {
+    if (!conversation_id || !hydrate) return undefined;
+    let cancelled = false;
+    setHistoryLoading(true);
+    setHistoryError("");
+    apiRequest(`/api/v1/conversations/${encodeURIComponent(conversation_id)}/messages`)
+      .then((records) => {
+        if (cancelled) return;
+        const restored = records
+          .filter((record) => record.status === "completed")
+          .map((record) => ({
+            id: record.message_id,
+            role: record.role,
+            content: record.content,
+            status: "done",
+          }));
+        setMessages((previous) => previous.length ? previous : restored);
+      })
+      .catch((caught) => {
+        if (!cancelled) setHistoryError(caught.message || "Could not load this conversation.");
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [conversation_id, hydrate]);
   useEffect(() => {
     if (!active) abortControllerRef.current?.abort();
   }, [active]);
@@ -110,7 +141,7 @@ export default function ChatWindow({
   async function handleSubmit(event, retryQuery) {
     event?.preventDefault();
     const query = (retryQuery ?? raw_query).trim();
-    if (!query || [...query].length > 4000 || abortControllerRef.current || !user_id?.trim() || !active) return;
+    if (!query || [...query].length > 4000 || abortControllerRef.current || !user_id?.trim() || !active || historyLoading) return;
 
     const assistantMessageId = crypto.randomUUID();
     const controller = new AbortController();
@@ -130,8 +161,14 @@ export default function ChatWindow({
     setShowJump(false);
 
     try {
+      let activeConversationId = conversation_id;
+      if (!activeConversationId && onEnsureConversation) {
+        activeConversationId = await onEnsureConversation(query);
+      }
       await streamChat({
-        raw_query: query, user_id, chat_history: history, k, rewrite_query, distance_threshold, access_token,
+        raw_query: query, user_id, chat_history: activeConversationId ? [] : history,
+        k, rewrite_query, distance_threshold, access_token, conversation_id: activeConversationId,
+        refreshAccessToken, onAuthExpired,
         signal: controller.signal,
         onEvent: ({ event, data }) => {
           if (controller.signal.aborted) return;
@@ -203,7 +240,9 @@ export default function ChatWindow({
       followScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
       setShowJump(!followScrollRef.current);
     }}>
-      {!messages.length ? <section className="empty-state">
+      {historyLoading ? <div className="history-loading" role="status"><LoaderCircle size={18} className="spin" /> Loading conversation…</div>
+        : historyError && !messages.length ? <div className="history-loading error" role="alert">{historyError}</div>
+        : !messages.length ? <section className="empty-state">
         <div className="empty-symbol"><Layers3 size={29} strokeWidth={1.6} /><span /></div>
         <span className="eyebrow">YOUR KNOWLEDGE, CONNECTED</span>
         <h2>Good questions.<br /><span>Grounded answers.</span></h2>
@@ -231,7 +270,7 @@ export default function ChatWindow({
           }} />
         <div className="composer-bottom"><span className="composer-context"><Layers3 size={13} /> Your knowledge <span className="composer-divider">/</span> {k} chunks</span><div><span className="character-count">{raw_query.length.toLocaleString()} / 4,000</span>
           {isStreaming ? <button type="button" className="send-button stop-button" onClick={stopStreaming} aria-label="Stop response"><Square size={15} fill="currentColor" /></button>
-            : <button className="send-button" type="submit" disabled={!raw_query.trim() || !user_id?.trim()} aria-label="Send question"><ArrowUp size={20} /></button>}
+            : <button className="send-button" type="submit" disabled={!raw_query.trim() || !user_id?.trim() || historyLoading} aria-label="Send question"><ArrowUp size={20} /></button>}
         </div></div>
       </form>
       <div className="composer-hint"><span><kbd>Enter</kbd> to send · <kbd>Shift + Enter</kbd> for a new line</span><span>Answers may contain mistakes.</span></div>
